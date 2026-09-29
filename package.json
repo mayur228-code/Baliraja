@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "server": "tsx server/index.ts",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/buildServer.js",
+    "build:server": "node scripts/buildServer.js",
     "lint": "oxlint",
     "preview": "vite preview"
   },
