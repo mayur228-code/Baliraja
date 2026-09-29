@@ -9,14 +9,14 @@ import type {
   FarmerResult,
   VerifiedBusinessInfo,
   OwnerProfile
-} from '../src/types/index.ts';
-import { sampleProducts } from '../src/data/productData.ts';
-import { defaultCategories } from '../src/data/navigationData.ts';
-import { fieldVisitItems as defaultFieldVisits } from '../src/data/fieldVisitsData.ts';
-import { fieldExperiences as defaultFieldExperiences } from '../src/data/fieldExperienceData.ts';
-import { defaultFarmerResults } from '../src/data/resultsData.ts';
-import { verifiedBusinessInfo as defaultBusinessInfo, ownerProfile as defaultOwnerProfile } from '../src/data/aboutData.ts';
-import { saveBase64ImageSync } from './storageService.ts';
+} from '../src/types/index';
+import { sampleProducts } from '../src/data/productData';
+import { defaultCategories } from '../src/data/navigationData';
+import { fieldVisitItems as defaultFieldVisits } from '../src/data/fieldVisitsData';
+import { fieldExperiences as defaultFieldExperiences } from '../src/data/fieldExperienceData';
+import { defaultFarmerResults } from '../src/data/resultsData';
+import { verifiedBusinessInfo as defaultBusinessInfo, ownerProfile as defaultOwnerProfile } from '../src/data/aboutData';
+import { saveBase64ImageSync } from './storageService';
 
 export interface AdminAuditEntry {
   id: string;
