@@ -56,6 +56,7 @@ app.use(
           "'self'",
           'data:',
           'blob:',
+          'https:',
         ],
         connectSrc: [
           "'self'",
@@ -63,6 +64,10 @@ app.use(
           'http://127.0.0.1:*',
           'ws://localhost:*',
           'ws://127.0.0.1:*',
+          'https://*.supabase.co',
+          'https://*.supabase.in',
+          'https://api.mymemory.translated.net',
+          'https://translate.googleapis.com',
           'https://*.tile.openstreetmap.fr',
           'https://*.openstreetmap.fr',
           'https://*.basemaps.cartocdn.com',
@@ -98,14 +103,18 @@ const allowedOrigins = [
 app.use(cors({
   origin: (origin, callback) => {
     // Allow same-origin / server-to-server / tools without Origin header
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      (typeof origin === 'string' && origin.endsWith('.vercel.app'))
+    ) {
       callback(null, true);
     } else {
       callback(new Error(`CORS blocked for origin: ${origin}`));
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-session-token', 'x-csrf-token', 'x-xsrf-token']
 }));
 

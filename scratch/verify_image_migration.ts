@@ -8,9 +8,7 @@ import { serverDb } from '../server/db.ts';
 import { 
   UPLOADS_DIR, 
   validateImageBuffer, 
-  verifyImageFile, 
-  deleteUploadFile,
-  saveBase64Image
+  verifyImageFile
 } from '../server/storageService.ts';
 
 // 1x1 transparent PNG base64

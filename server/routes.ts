@@ -14,8 +14,10 @@ const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function isSecureCookie(): boolean {
   return (
-    process.env.NODE_ENV === 'production' &&
-    (process.env.APP_URL?.startsWith('https') || process.env.COOKIE_SECURE === 'true')
+    process.env.NODE_ENV === 'production' ||
+    process.env.VERCEL === '1' ||
+    Boolean(process.env.APP_URL?.startsWith('https')) ||
+    process.env.COOKIE_SECURE === 'true'
   );
 }
 
@@ -23,7 +25,7 @@ function getSessionCookieOptions() {
   return {
     httpOnly: true,
     secure: isSecureCookie(),
-    sameSite: 'strict' as const,
+    sameSite: 'lax' as const,
     maxAge: SESSION_TTL_MS,
     path: '/'
   };
@@ -33,7 +35,7 @@ function getCsrfCookieOptions() {
   return {
     httpOnly: false, // Must be readable by client JS to attach to X-CSRF-Token header
     secure: isSecureCookie(),
-    sameSite: 'strict' as const,
+    sameSite: 'lax' as const,
     maxAge: SESSION_TTL_MS,
     path: '/'
   };

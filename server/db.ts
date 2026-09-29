@@ -9,7 +9,7 @@ const DB_FILE = path.join(DB_DIR, 'admin_auth.json');
 
 // Initial administrative credentials provisioning (used only if database file does not exist)
 function initDefaultDb(): ServerAuthDatabase {
-  const initialEmail = (process.env.INITIAL_ADMIN_EMAIL || 'shinde.krishi.director@baliraja.in').trim().toLowerCase();
+  const initialEmail = (process.env.INITIAL_ADMIN_EMAIL || 'balirajaksk.kaij@gmail.com').trim().toLowerCase();
   const initialPass = process.env.INITIAL_ADMIN_PASSWORD || crypto.randomBytes(12).toString('hex');
   
   if (!process.env.INITIAL_ADMIN_PASSWORD) {
