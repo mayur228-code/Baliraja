@@ -120,10 +120,10 @@ function sanitizeString(val: unknown, maxLen = 5000): string {
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. FULL CONTENT BUNDLE (Public Read, Protected Reset/Import/Export)
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/', (req: Request, res: Response) => {
+contentRouter.get('/', async (req: Request, res: Response) => {
   const startTime = Date.now();
   try {
-    const data = serverContentDb.getAllContent();
+    const data = await serverContentDb.getAllContent();
     const durationMs = Date.now() - startTime;
     console.log(`[DIAGNOSTIC_CONTENT_GET] Path: ${req.originalUrl || req.url} | Status: 200 | Products: ${data?.products?.length ?? 0} | Categories: ${data?.categories?.length ?? 0} | Duration: ${durationMs}ms`);
     res.json({ success: true, data });
@@ -142,442 +142,654 @@ contentRouter.get('/', (req: Request, res: Response) => {
   }
 });
 
-contentRouter.post('/reset', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const data = serverContentDb.resetToDefaults(performedBy);
-  res.json({ success: true, messageEn: 'Content reset to verified defaults', data });
-});
-
-contentRouter.post('/import', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const result = serverContentDb.importBackup(req.body, performedBy);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
+contentRouter.post('/reset', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const data = await serverContentDb.resetToDefaults(performedBy);
+    res.json({ success: true, messageEn: 'Content reset to verified defaults', data });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Reset failed: ${msg}` });
   }
-  res.json({ success: true, data: serverContentDb.getAllContent() });
 });
 
-contentRouter.get('/export', requireAdminAuth, (_req: Request, res: Response) => {
-  const data = serverContentDb.getAllContent();
-  res.json(data);
+contentRouter.post('/import', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const result = await serverContentDb.importBackup(req.body, performedBy);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    const all = await serverContentDb.getAllContent();
+    res.json({ success: true, data: all });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Import failed: ${msg}` });
+  }
 });
 
-contentRouter.get('/audit-log', requireAdminAuth, (_req: Request, res: Response) => {
-  const data = serverContentDb.getAuditLog();
-  res.json({ success: true, data });
+contentRouter.get('/export', requireAdminAuth, async (_req: Request, res: Response) => {
+  try {
+    const data = await serverContentDb.getAllContent();
+    res.json(data);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Export failed: ${msg}` });
+  }
+});
+
+contentRouter.get('/audit-log', requireAdminAuth, async (_req: Request, res: Response) => {
+  try {
+    const data = await serverContentDb.getAuditLog();
+    res.json({ success: true, data });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Audit log retrieval failed: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 2. PRODUCTS CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/products', (_req: Request, res: Response) => {
-  const products = serverContentDb.getProducts();
-  res.json({ success: true, data: products });
+contentRouter.get('/products', async (_req: Request, res: Response) => {
+  try {
+    const products = await serverContentDb.getProducts();
+    res.json({ success: true, data: products });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get products: ${msg}` });
+  }
 });
 
-contentRouter.get('/products/:id', (req: Request, res: Response) => {
-  const id = getParamId(req);
-  const product = serverContentDb.getProductById(id);
-  if (!product) {
-    res.status(404).json({ success: false, errorEn: 'Product not found' });
-    return;
+contentRouter.get('/products/:id', async (req: Request, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const product = await serverContentDb.getProductById(id);
+    if (!product) {
+      res.status(404).json({ success: false, errorEn: 'Product not found' });
+      return;
+    }
+    res.json({ success: true, data: product });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get product: ${msg}` });
   }
-  res.json({ success: true, data: product });
 });
 
-contentRouter.post('/products', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const body = req.body || {};
+contentRouter.post('/products', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const body = req.body || {};
 
-  const nameEnglish = sanitizeString(body.nameEnglish, 250);
-  const nameMarathi = sanitizeString(body.nameMarathi, 250);
-  if (!nameEnglish && !nameMarathi) {
-    res.status(400).json({ success: false, errorEn: 'Product name in English or Marathi is required' });
-    return;
+    const nameEnglish = sanitizeString(body.nameEnglish, 250);
+    const nameMarathi = sanitizeString(body.nameMarathi, 250);
+    if (!nameEnglish && !nameMarathi) {
+      res.status(400).json({ success: false, errorEn: 'Product name in English or Marathi is required' });
+      return;
+    }
+
+    const created = await serverContentDb.createProduct(body, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create product: ${msg}` });
   }
-
-  const created = serverContentDb.createProduct(body, performedBy);
-  res.status(201).json({ success: true, data: created });
 });
 
-contentRouter.put('/products/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateProduct(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: 'Product not found' });
-    return;
+contentRouter.put('/products/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateProduct(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: 'Product not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update product: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
 
-contentRouter.patch('/products/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateProduct(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: 'Product not found' });
-    return;
+contentRouter.patch('/products/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateProduct(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: 'Product not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to patch product: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
 
-contentRouter.delete('/products/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteProduct(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Product not found' });
-    return;
+contentRouter.delete('/products/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteProduct(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Product not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete product: ${msg}` });
   }
-  res.json({ success: true });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 3. CATEGORIES CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/categories', (_req: Request, res: Response) => {
-  const categories = serverContentDb.getCategories();
-  res.json({ success: true, data: categories });
+contentRouter.get('/categories', async (_req: Request, res: Response) => {
+  try {
+    const categories = await serverContentDb.getCategories();
+    res.json({ success: true, data: categories });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get categories: ${msg}` });
+  }
 });
 
-contentRouter.get('/categories/:id', (req: Request, res: Response) => {
-  const id = getParamId(req);
-  const category = serverContentDb.getCategoryById(id);
-  if (!category) {
-    res.status(404).json({ success: false, errorEn: 'Category not found' });
-    return;
+contentRouter.get('/categories/:id', async (req: Request, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const category = await serverContentDb.getCategoryById(id);
+    if (!category) {
+      res.status(404).json({ success: false, errorEn: 'Category not found' });
+      return;
+    }
+    res.json({ success: true, data: category });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get category: ${msg}` });
   }
-  res.json({ success: true, data: category });
 });
 
-contentRouter.post('/categories', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const body = req.body || {};
-  const name = sanitizeString(body.name, 150);
-  if (!name) {
-    res.status(400).json({ success: false, errorEn: 'Category name is required' });
-    return;
-  }
+contentRouter.post('/categories', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const body = req.body || {};
+    const name = sanitizeString(body.name, 150);
+    if (!name) {
+      res.status(400).json({ success: false, errorEn: 'Category name is required' });
+      return;
+    }
 
-  const created = serverContentDb.createCategory(body, performedBy);
-  res.status(201).json({ success: true, data: created });
+    const created = await serverContentDb.createCategory(body, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create category: ${msg}` });
+  }
 });
 
-contentRouter.put('/categories/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateCategory(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: 'Category not found' });
-    return;
+contentRouter.put('/categories/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateCategory(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: 'Category not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update category: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
 
-contentRouter.patch('/categories/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateCategory(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: 'Category not found' });
-    return;
+contentRouter.patch('/categories/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateCategory(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: 'Category not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to patch category: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
 
-contentRouter.delete('/categories/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteCategory(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Category not found' });
-    return;
+contentRouter.delete('/categories/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteCategory(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Category not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete category: ${msg}` });
   }
-  res.json({ success: true });
 });
 
-contentRouter.post('/categories/reorder', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of category IDs' });
-    return;
+contentRouter.post('/categories/reorder', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of category IDs' });
+      return;
+    }
+    const categories = await serverContentDb.reorderCategories(orderedIds, performedBy);
+    res.json({ success: true, data: categories });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder categories: ${msg}` });
   }
-  const categories = serverContentDb.reorderCategories(orderedIds, performedBy);
-  res.json({ success: true, data: categories });
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 4. BRANDS CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/brands', (_req: Request, res: Response) => {
-  const brands = serverContentDb.getBrands();
-  res.json({ success: true, data: brands });
-});
-
-contentRouter.post('/brands', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const created = serverContentDb.createBrand(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-
-contentRouter.put('/brands/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateBrand(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-
-contentRouter.delete('/brands/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteBrand(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Brand not found' });
-    return;
+contentRouter.get('/brands', async (_req: Request, res: Response) => {
+  try {
+    const brands = await serverContentDb.getBrands();
+    res.json({ success: true, data: brands });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get brands: ${msg}` });
   }
-  res.json({ success: true });
 });
 
-contentRouter.post('/brands/reorder', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of brand IDs' });
-    return;
+contentRouter.post('/brands', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const created = await serverContentDb.createBrand(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create brand: ${msg}` });
   }
-  const brands = serverContentDb.reorderBrands(orderedIds, performedBy);
-  res.json({ success: true, data: brands });
+});
+
+contentRouter.put('/brands/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateBrand(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update brand: ${msg}` });
+  }
+});
+
+contentRouter.delete('/brands/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteBrand(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Brand not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete brand: ${msg}` });
+  }
+});
+
+contentRouter.post('/brands/reorder', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of brand IDs' });
+      return;
+    }
+    const brands = await serverContentDb.reorderBrands(orderedIds, performedBy);
+    res.json({ success: true, data: brands });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder brands: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 5. FIELD VISITS CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/field-visits', (_req: Request, res: Response) => {
-  const visits = serverContentDb.getFieldVisits();
-  res.json({ success: true, data: visits });
-});
-
-contentRouter.post('/field-visits', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const created = serverContentDb.createFieldVisit(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-
-contentRouter.put('/field-visits/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateFieldVisit(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: 'Field visit not found' });
-    return;
+contentRouter.get('/field-visits', async (_req: Request, res: Response) => {
+  try {
+    const visits = await serverContentDb.getFieldVisits();
+    res.json({ success: true, data: visits });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get field visits: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
 
-contentRouter.delete('/field-visits/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteFieldVisit(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Field visit not found' });
-    return;
+contentRouter.post('/field-visits', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const created = await serverContentDb.createFieldVisit(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create field visit: ${msg}` });
   }
-  res.json({ success: true });
 });
 
-contentRouter.post('/field-visits/reorder', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of visit IDs' });
-    return;
+contentRouter.put('/field-visits/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateFieldVisit(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: 'Field visit not found' });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update field visit: ${msg}` });
   }
-  const visits = serverContentDb.reorderFieldVisits(orderedIds, performedBy);
-  res.json({ success: true, data: visits });
+});
+
+contentRouter.delete('/field-visits/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteFieldVisit(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Field visit not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete field visit: ${msg}` });
+  }
+});
+
+contentRouter.post('/field-visits/reorder', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of visit IDs' });
+      return;
+    }
+    const visits = await serverContentDb.reorderFieldVisits(orderedIds, performedBy);
+    res.json({ success: true, data: visits });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder field visits: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 6. FIELD EXPERIENCES CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/field-experiences', (_req: Request, res: Response) => {
-  const data = serverContentDb.getFieldExperiences();
-  res.json({ success: true, data });
-});
-
-contentRouter.post('/field-experiences', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const created = serverContentDb.createFieldExperience(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-
-contentRouter.put('/field-experiences/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateFieldExperience(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-
-contentRouter.delete('/field-experiences/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteFieldExperience(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Field experience not found' });
-    return;
+contentRouter.get('/field-experiences', async (_req: Request, res: Response) => {
+  try {
+    const data = await serverContentDb.getFieldExperiences();
+    res.json({ success: true, data });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get field experiences: ${msg}` });
   }
-  res.json({ success: true });
+});
+
+contentRouter.post('/field-experiences', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const created = await serverContentDb.createFieldExperience(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create field experience: ${msg}` });
+  }
+});
+
+contentRouter.put('/field-experiences/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateFieldExperience(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update field experience: ${msg}` });
+  }
+});
+
+contentRouter.delete('/field-experiences/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteFieldExperience(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Field experience not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete field experience: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 7. FARMER RESULTS CRUD
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/results', (_req: Request, res: Response) => {
-  const results = serverContentDb.getResults();
-  res.json({ success: true, data: results });
-});
-
-contentRouter.post('/results', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const created = serverContentDb.createResult(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-
-contentRouter.put('/results/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateResult(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-
-contentRouter.delete('/results/:id', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const deleted = serverContentDb.deleteResult(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'Result not found' });
-    return;
+contentRouter.get('/results', async (_req: Request, res: Response) => {
+  try {
+    const results = await serverContentDb.getResults();
+    res.json({ success: true, data: results });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get results: ${msg}` });
   }
-  res.json({ success: true });
 });
 
-contentRouter.post('/results/reorder', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of result IDs' });
-    return;
+contentRouter.post('/results', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const created = await serverContentDb.createResult(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create result: ${msg}` });
   }
-  const results = serverContentDb.reorderResults(orderedIds, performedBy);
-  res.json({ success: true, data: results });
+});
+
+contentRouter.put('/results/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateResult(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update result: ${msg}` });
+  }
+});
+
+contentRouter.delete('/results/:id', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const deleted = await serverContentDb.deleteResult(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'Result not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete result: ${msg}` });
+  }
+});
+
+contentRouter.post('/results/reorder', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: 'orderedIds must be an array of result IDs' });
+      return;
+    }
+    const results = await serverContentDb.reorderResults(orderedIds, performedBy);
+    res.json({ success: true, data: results });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder results: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 8. BUSINESS INFO & OWNER PROFILE
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/business-info', (_req: Request, res: Response) => {
-  const businessInfo = serverContentDb.getBusinessInfo();
-  res.json({ success: true, data: businessInfo });
+contentRouter.get('/business-info', async (_req: Request, res: Response) => {
+  try {
+    const businessInfo = await serverContentDb.getBusinessInfo();
+    res.json({ success: true, data: businessInfo });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get business info: ${msg}` });
+  }
 });
 
-contentRouter.put('/business-info', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateBusinessInfo(req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
+contentRouter.put('/business-info', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateBusinessInfo(req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update business info: ${msg}` });
+  }
 });
 
-contentRouter.get('/owner-profile', (_req: Request, res: Response) => {
-  const ownerProfile = serverContentDb.getOwnerProfile();
-  res.json({ success: true, data: ownerProfile });
+contentRouter.get('/owner-profile', async (_req: Request, res: Response) => {
+  try {
+    const ownerProfile = await serverContentDb.getOwnerProfile();
+    res.json({ success: true, data: ownerProfile });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get owner profile: ${msg}` });
+  }
 });
 
-contentRouter.put('/owner-profile', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const performedBy = req.adminUser?.name || 'Administrator';
-  const updated = serverContentDb.updateOwnerProfile(req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
+contentRouter.put('/owner-profile', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const performedBy = req.adminUser?.name || 'Administrator';
+    const updated = await serverContentDb.updateOwnerProfile(req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update owner profile: ${msg}` });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════════
 // 9. PROTECTED IMAGE UPLOAD & ASSET MANAGEMENT
 // ════════════════════════════════════════════════════════════════════════════════
 contentRouter.post('/upload', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
-  const { image, dataUrl, prefix = 'upload' } = req.body || {};
-  const payload = image || dataUrl;
+  try {
+    const { image, dataUrl, prefix = 'upload' } = req.body || {};
+    const payload = image || dataUrl;
 
-  if (!payload || typeof payload !== 'string') {
-    res.status(400).json({
-      success: false,
-      errorEn: 'Missing image payload. Please provide a valid Base64 data URL.',
-      errorMr: 'प्रतिमा डेटा गहाळ आहे. कृपया वैध प्रतिमा डेटा निवडा.'
-    });
-    return;
+    if (!payload || typeof payload !== 'string') {
+      res.status(400).json({
+        success: false,
+        errorEn: 'Missing image payload. Please provide a valid Base64 data URL.',
+        errorMr: 'प्रतिमा डेटा गहाळ आहे. कृपया वैध प्रतिमा डेटा निवडा.'
+      });
+      return;
+    }
+
+    const result = await saveBase64Image(payload, String(prefix));
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    const performedBy = req.adminUser?.name || 'Administrator';
+    await serverContentDb.recordAudit(
+      `Uploaded media asset: ${result.filename} (${((result.size || 0) / 1024).toFixed(1)} KB)`,
+      `मीडिया फाइल अपलोड केली: ${result.filename}`,
+      'system',
+      performedBy
+    );
+
+    res.status(201).json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Upload processing failed: ${msg}` });
   }
-
-  const result = await saveBase64Image(payload, String(prefix));
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-
-  const performedBy = req.adminUser?.name || 'Administrator';
-  serverContentDb.recordAudit(
-    `Uploaded media asset: ${result.filename} (${((result.size || 0) / 1024).toFixed(1)} KB)`,
-    `मीडिया फाइल अपलोड केली: ${result.filename}`,
-    'system',
-    performedBy
-  );
-
-  res.status(201).json(result);
 });
 
-contentRouter.delete('/upload', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {
-  const { url } = req.body || {};
-  if (!url || typeof url !== 'string') {
-    res.status(400).json({ success: false, errorEn: 'Image URL is required' });
-    return;
-  }
+contentRouter.delete('/upload', requireAdminAuth, requireCsrf, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { url } = req.body || {};
+    if (!url || typeof url !== 'string') {
+      res.status(400).json({ success: false, errorEn: 'Image URL is required' });
+      return;
+    }
 
-  // Check if image is currently referenced in any active catalog entity
-  const allContent = serverContentDb.getAllContent();
-  const referencedUrls = new Set<string>();
+    // Check if image is currently referenced in any active catalog entity
+    const allContent = await serverContentDb.getAllContent();
+    const referencedUrls = new Set<string>();
 
-  allContent.products?.forEach((p) => {
-    if (p.image) referencedUrls.add(p.image);
-    if (p.imageUrl) referencedUrls.add(p.imageUrl);
-  });
-  allContent.categories?.forEach((c) => {
-    if (c.image) referencedUrls.add(c.image);
-  });
-  allContent.brands?.forEach((b) => {
-    if (b.logo) referencedUrls.add(b.logo);
-  });
-  allContent.fieldVisits?.forEach((v) => {
-    if (v.imageSrc) referencedUrls.add(v.imageSrc);
-  });
-  allContent.results?.forEach((r) => {
-    if (r.image) referencedUrls.add(r.image);
-  });
-  allContent.fieldExperiences?.forEach((f) => {
-    if (f.image) referencedUrls.add(f.image);
-  });
-  if (allContent.ownerProfile?.image) referencedUrls.add(allContent.ownerProfile.image);
-
-  if (referencedUrls.has(url)) {
-    res.status(409).json({
-      success: false,
-      errorEn: 'Cannot delete image: It is currently assigned to one or more active catalog items.',
-      errorMr: 'प्रतिमा हटवता येत नाही: ती सध्या इतर घटकांमध्ये वापरात आहे.'
+    allContent.products?.forEach((p) => {
+      if (p.image) referencedUrls.add(p.image);
+      if (p.imageUrl) referencedUrls.add(p.imageUrl);
     });
-    return;
-  }
+    allContent.categories?.forEach((c) => {
+      if (c.image) referencedUrls.add(c.image);
+    });
+    allContent.brands?.forEach((b) => {
+      if (b.logo) referencedUrls.add(b.logo);
+    });
+    allContent.fieldVisits?.forEach((v) => {
+      if (v.imageSrc) referencedUrls.add(v.imageSrc);
+    });
+    allContent.results?.forEach((r) => {
+      if (r.image) referencedUrls.add(r.image);
+    });
+    allContent.fieldExperiences?.forEach((f) => {
+      if (f.image) referencedUrls.add(f.image);
+    });
+    if (allContent.ownerProfile?.image) referencedUrls.add(allContent.ownerProfile.image);
 
-  const deleted = deleteUploadFile(url);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: 'File not found or cannot be deleted.' });
-    return;
-  }
+    if (referencedUrls.has(url)) {
+      res.status(409).json({
+        success: false,
+        errorEn: 'Cannot delete image: It is currently assigned to one or more active catalog items.',
+        errorMr: 'प्रतिमा हटवता येत नाही: ती सध्या इतर घटकांमध्ये वापरात आहे.'
+      });
+      return;
+    }
 
-  res.json({ success: true, messageEn: 'Image file removed from server disk.' });
+    const deleted = await deleteUploadFile(url);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: 'File not found or cannot be deleted.' });
+      return;
+    }
+
+    res.json({ success: true, messageEn: 'Image file removed from server disk.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete file: ${msg}` });
+  }
 });
+

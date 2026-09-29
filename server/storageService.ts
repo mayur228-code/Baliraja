@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { getSupabaseAdmin, SUPABASE_STORAGE_BUCKET, isSupabaseServerConfigured } from './supabaseClient';
 
 export const UPLOADS_DIR = path.resolve(process.cwd(), 'server/uploads');
 
@@ -10,7 +11,7 @@ try {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
 } catch (err) {
-  console.warn('[STORAGE_SERVICE] Uploads directory is read-only or not writable:', err instanceof Error ? err.message : String(err));
+  console.warn('[STORAGE_SERVICE] Uploads directory is read-only or not writable (operating in-memory / cloud storage mode):', err instanceof Error ? err.message : String(err));
 }
 
 export interface ImageValidationResult {
@@ -85,7 +86,6 @@ export function validateImageBuffer(buffer: Buffer): ImageValidationResult {
   if (headerSample.includes('<svg') || headerSample.includes('<?xml')) {
     const fullText = buffer.toString('utf-8').toLowerCase();
     if (fullText.includes('<svg') && fullText.includes('</svg>')) {
-      // Reject dangerous active content embedded inside SVGs
       const dangerousPatterns = [
         '<script',
         'javascript:',
@@ -140,7 +140,6 @@ export function extractBufferFromBase64(dataUrlOrBase64: string): { buffer: Buff
     }
   }
 
-  // Raw base64 string fallback
   try {
     const buffer = Buffer.from(trimmed, 'base64');
     return { buffer };
@@ -150,7 +149,7 @@ export function extractBufferFromBase64(dataUrlOrBase64: string): { buffer: Buff
 }
 
 /**
- * Save an uploaded Base64 image directly to the secure server upload folder.
+ * Save an uploaded Base64 image to Supabase Storage (Production) or local disk (Development Fallback).
  */
 export async function saveBase64Image(dataUrlOrBase64: string, prefix = 'upload'): Promise<UploadResult> {
   const extracted = extractBufferFromBase64(dataUrlOrBase64);
@@ -166,7 +165,7 @@ export async function saveBase64Image(dataUrlOrBase64: string, prefix = 'upload'
 }
 
 /**
- * Synchronously converts a Base64 data URL to a persistent server upload file.
+ * Synchronously converts a Base64 data URL to a persistent server upload file (fallback utility).
  * Returns the public /uploads/... URL or the original string if not base64.
  */
 export function saveBase64ImageSync(dataUrlOrBase64: string, prefix = 'upload'): string {
@@ -192,13 +191,13 @@ export function saveBase64ImageSync(dataUrlOrBase64: string, prefix = 'upload'):
     fs.renameSync(tmpPath, filePath);
     return `/uploads/${filename}`;
   } catch (err) {
-    console.error('[STORAGE_SERVICE] Failed to save base64 image synchronously:', err);
+    console.warn('[STORAGE_SERVICE] Could not save base64 image synchronously to disk (read-only filesystem):', err);
     return dataUrlOrBase64;
   }
 }
 
 /**
- * Save raw binary image Buffer to server uploads directory with full validation.
+ * Save raw binary image Buffer to Supabase Storage (Production) with local disk fallback (Development).
  */
 export async function saveBinaryImage(buffer: Buffer, prefix = 'upload'): Promise<UploadResult> {
   const validation = validateImageBuffer(buffer);
@@ -211,9 +210,46 @@ export async function saveBinaryImage(buffer: Buffer, prefix = 'upload'): Promis
   }
 
   const filename = generateSafeFilename(prefix, validation.extension);
+
+  // 1. Production Mode: Supabase Storage CDN
+  if (isSupabaseServerConfigured()) {
+    const supabase = getSupabaseAdmin();
+    if (supabase) {
+      const storagePath = `${prefix}/${filename}`;
+      try {
+        const { error: uploadError } = await supabase.storage
+          .from(SUPABASE_STORAGE_BUCKET)
+          .upload(storagePath, buffer, {
+            contentType: validation.mimeType,
+            upsert: false,
+          });
+
+        if (uploadError) {
+          console.warn('[STORAGE_SERVICE] Supabase Storage upload failed, falling back to local storage:', uploadError.message);
+        } else {
+          const { data: publicUrlData } = supabase.storage
+            .from(SUPABASE_STORAGE_BUCKET)
+            .getPublicUrl(storagePath);
+
+          if (publicUrlData && publicUrlData.publicUrl) {
+            return {
+              success: true,
+              url: publicUrlData.publicUrl,
+              filename,
+              size: buffer.length,
+              mimeType: validation.mimeType,
+            };
+          }
+        }
+      } catch (cloudErr) {
+        console.warn('[STORAGE_SERVICE] Exception during Supabase upload, falling back to local storage:', cloudErr);
+      }
+    }
+  }
+
+  // 2. Development Fallback: Local Filesystem Storage
   const filePath = path.join(UPLOADS_DIR, filename);
 
-  // Security check: Verify filePath does not escape UPLOADS_DIR
   const resolved = path.resolve(filePath);
   if (!resolved.startsWith(UPLOADS_DIR)) {
     return {
@@ -224,12 +260,10 @@ export async function saveBinaryImage(buffer: Buffer, prefix = 'upload'): Promis
   }
 
   try {
-    // Write file atomically via tmp file
     const tmpPath = `${filePath}.tmp_${crypto.randomBytes(4).toString('hex')}`;
     fs.writeFileSync(tmpPath, buffer);
     fs.renameSync(tmpPath, filePath);
 
-    // Verify written file exists and matches size
     const stat = fs.statSync(filePath);
     if (stat.size !== buffer.length) {
       throw new Error(`Written file size mismatch (expected ${buffer.length}, got ${stat.size})`);
@@ -255,11 +289,15 @@ export async function saveBinaryImage(buffer: Buffer, prefix = 'upload'): Promis
 }
 
 /**
- * Verify if a given image URL or filename exists on server disk and is a valid image.
+ * Verify if a given image URL or filename exists on server disk or is a valid URL.
  */
 export function verifyImageFile(urlOrFilename: string): { exists: boolean; size: number; valid: boolean } {
   if (!urlOrFilename || typeof urlOrFilename !== 'string') {
     return { exists: false, size: 0, valid: false };
+  }
+
+  if (urlOrFilename.startsWith('http://') || urlOrFilename.startsWith('https://')) {
+    return { exists: true, size: 1, valid: true };
   }
 
   const cleanName = path.basename(urlOrFilename.replace(/^\/uploads\//, '').split('?')[0]);
@@ -286,10 +324,29 @@ export function verifyImageFile(urlOrFilename: string): { exists: boolean; size:
 }
 
 /**
- * Safely delete an uploaded file from server disk.
+ * Safely delete an uploaded file from Supabase Storage or server disk.
  */
-export function deleteUploadFile(urlOrFilename: string): boolean {
+export async function deleteUploadFile(urlOrFilename: string): Promise<boolean> {
   if (!urlOrFilename || typeof urlOrFilename !== 'string') return false;
+
+  // 1. Supabase Storage deletion
+  if (urlOrFilename.includes('/storage/v1/object/public/' + SUPABASE_STORAGE_BUCKET)) {
+    const supabase = getSupabaseAdmin();
+    if (supabase) {
+      try {
+        const parts = urlOrFilename.split('/storage/v1/object/public/' + SUPABASE_STORAGE_BUCKET + '/');
+        if (parts[1]) {
+          const objectPath = decodeURIComponent(parts[1].split('?')[0]);
+          const { error } = await supabase.storage.from(SUPABASE_STORAGE_BUCKET).remove([objectPath]);
+          if (!error) return true;
+        }
+      } catch (err) {
+        console.error('[STORAGE_SERVICE] Failed to delete from Supabase storage:', err);
+      }
+    }
+  }
+
+  // 2. Local disk deletion
   if (!urlOrFilename.startsWith('/uploads/') && !urlOrFilename.includes('server/uploads')) {
     return false; // Do not touch static assets or external URLs
   }

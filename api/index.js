@@ -2411,13 +2411,54 @@ var verifiedBusinessInfo = {
 import fs2 from "node:fs";
 import path2 from "node:path";
 import crypto4 from "node:crypto";
+
+// server/supabaseClient.ts
+import { createClient } from "@supabase/supabase-js";
+var SUPABASE_STORAGE_BUCKET = (process.env.SUPABASE_STORAGE_BUCKET || "baliraja-assets").trim();
+function getSupabaseUrl() {
+  return (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "").trim();
+}
+function getSupabaseServiceKey() {
+  return (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || "").trim();
+}
+function isSupabaseServerConfigured() {
+  const url = getSupabaseUrl();
+  const key = getSupabaseServiceKey();
+  return Boolean(
+    url && key && url.startsWith("https://") && key.length > 20
+  );
+}
+var cachedClient = null;
+function getSupabaseAdmin() {
+  if (!isSupabaseServerConfigured()) {
+    return null;
+  }
+  if (!cachedClient) {
+    try {
+      const url = getSupabaseUrl();
+      const key = getSupabaseServiceKey();
+      cachedClient = createClient(url, key, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false
+        }
+      });
+    } catch (err) {
+      console.warn("[SUPABASE_SERVER] Failed to initialize Supabase admin client:", err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }
+  return cachedClient;
+}
+
+// server/storageService.ts
 var UPLOADS_DIR = path2.resolve(process.cwd(), "server/uploads");
 try {
   if (!fs2.existsSync(UPLOADS_DIR)) {
     fs2.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
 } catch (err) {
-  console.warn("[STORAGE_SERVICE] Uploads directory is read-only or not writable:", err instanceof Error ? err.message : String(err));
+  console.warn("[STORAGE_SERVICE] Uploads directory is read-only or not writable (operating in-memory / cloud storage mode):", err instanceof Error ? err.message : String(err));
 }
 function validateImageBuffer(buffer) {
   if (!buffer || buffer.length === 0) {
@@ -2523,7 +2564,7 @@ function saveBase64ImageSync(dataUrlOrBase64, prefix = "upload") {
     fs2.renameSync(tmpPath, filePath);
     return `/uploads/${filename}`;
   } catch (err) {
-    console.error("[STORAGE_SERVICE] Failed to save base64 image synchronously:", err);
+    console.warn("[STORAGE_SERVICE] Could not save base64 image synchronously to disk (read-only filesystem):", err);
     return dataUrlOrBase64;
   }
 }
@@ -2537,6 +2578,34 @@ async function saveBinaryImage(buffer, prefix = "upload") {
     };
   }
   const filename = generateSafeFilename(prefix, validation.extension);
+  if (isSupabaseServerConfigured()) {
+    const supabase = getSupabaseAdmin();
+    if (supabase) {
+      const storagePath = `${prefix}/${filename}`;
+      try {
+        const { error: uploadError } = await supabase.storage.from(SUPABASE_STORAGE_BUCKET).upload(storagePath, buffer, {
+          contentType: validation.mimeType,
+          upsert: false
+        });
+        if (uploadError) {
+          console.warn("[STORAGE_SERVICE] Supabase Storage upload failed, falling back to local storage:", uploadError.message);
+        } else {
+          const { data: publicUrlData } = supabase.storage.from(SUPABASE_STORAGE_BUCKET).getPublicUrl(storagePath);
+          if (publicUrlData && publicUrlData.publicUrl) {
+            return {
+              success: true,
+              url: publicUrlData.publicUrl,
+              filename,
+              size: buffer.length,
+              mimeType: validation.mimeType
+            };
+          }
+        }
+      } catch (cloudErr) {
+        console.warn("[STORAGE_SERVICE] Exception during Supabase upload, falling back to local storage:", cloudErr);
+      }
+    }
+  }
   const filePath = path2.join(UPLOADS_DIR, filename);
   const resolved = path2.resolve(filePath);
   if (!resolved.startsWith(UPLOADS_DIR)) {
@@ -2572,8 +2641,23 @@ async function saveBinaryImage(buffer, prefix = "upload") {
     };
   }
 }
-function deleteUploadFile(urlOrFilename) {
+async function deleteUploadFile(urlOrFilename) {
   if (!urlOrFilename || typeof urlOrFilename !== "string") return false;
+  if (urlOrFilename.includes("/storage/v1/object/public/" + SUPABASE_STORAGE_BUCKET)) {
+    const supabase = getSupabaseAdmin();
+    if (supabase) {
+      try {
+        const parts = urlOrFilename.split("/storage/v1/object/public/" + SUPABASE_STORAGE_BUCKET + "/");
+        if (parts[1]) {
+          const objectPath = decodeURIComponent(parts[1].split("?")[0]);
+          const { error } = await supabase.storage.from(SUPABASE_STORAGE_BUCKET).remove([objectPath]);
+          if (!error) return true;
+        }
+      } catch (err) {
+        console.error("[STORAGE_SERVICE] Failed to delete from Supabase storage:", err);
+      }
+    }
+  }
   if (!urlOrFilename.startsWith("/uploads/") && !urlOrFilename.includes("server/uploads")) {
     return false;
   }
@@ -2620,11 +2704,368 @@ function initDefaultContent() {
     lastModified: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
+function mapCategoryFromDb(row) {
+  return {
+    id: row.id,
+    slug: row.slug || row.id,
+    name: row.name,
+    nameMr: row.name_mr,
+    image: row.image || "",
+    icon: row.icon || "Layers",
+    shortDesc: row.short_desc || "",
+    shortDescMr: row.short_desc_mr || "",
+    subcategories: Array.isArray(row.subcategories) ? row.subcategories : [],
+    highlight: Boolean(row.highlight),
+    featured: Boolean(row.featured),
+    order: typeof row.display_order === "number" ? row.display_order : 1,
+    active: row.active !== false
+  };
+}
+function mapCategoryToDb(cat) {
+  const isFeatured = Boolean(cat.featured || cat.highlight);
+  return {
+    id: cat.id,
+    slug: cat.slug || cat.id,
+    name: cat.name,
+    name_mr: cat.nameMr || cat.name,
+    image: cat.image || "",
+    icon: cat.icon || "Layers",
+    short_desc: cat.shortDesc || "",
+    short_desc_mr: cat.shortDescMr || "",
+    subcategories: Array.isArray(cat.subcategories) ? cat.subcategories : [],
+    highlight: isFeatured,
+    featured: isFeatured,
+    display_order: typeof cat.order === "number" ? cat.order : 1,
+    active: cat.active !== false,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapProductFromDb(row) {
+  const priceVal = row.price !== null && row.price !== void 0 ? Number(row.price) : void 0;
+  return {
+    id: row.id,
+    slug: row.slug || row.id,
+    nameEnglish: row.name_english,
+    nameMarathi: row.name_marathi,
+    categoryId: row.category_id,
+    category: row.category_id,
+    subcategoryId: row.subcategory_id || void 0,
+    descriptionEnglish: row.description_english || "",
+    descriptionMarathi: row.description_marathi || "",
+    image: row.image,
+    imageUrl: row.image_url || void 0,
+    price: priceVal !== void 0 && !isNaN(priceVal) ? priceVal : void 0,
+    availability: row.availability || "available",
+    featured: Boolean(row.featured || row.is_bestseller),
+    isBestseller: Boolean(row.is_bestseller || row.featured),
+    popularity: typeof row.popularity === "number" ? row.popularity : 0,
+    displayOrder: typeof row.display_order === "number" ? row.display_order : 1,
+    isSample: Boolean(row.is_sample),
+    keyPointsEnglish: Array.isArray(row.key_points_english) ? row.key_points_english : [],
+    keyPointsMarathi: Array.isArray(row.key_points_marathi) ? row.key_points_marathi : [],
+    suitableCropsEnglish: Array.isArray(row.suitable_crops_english) ? row.suitable_crops_english : [],
+    suitableCropsMarathi: Array.isArray(row.suitable_crops_marathi) ? row.suitable_crops_marathi : [],
+    translationSource: row.translation_source || void 0,
+    customTranslation: Boolean(row.custom_translation),
+    createdAt: row.created_at
+  };
+}
+function mapProductToDb(prod) {
+  const isFeatured = Boolean(prod.featured || prod.isBestseller);
+  let cleanPrice = null;
+  if (prod.price !== void 0 && prod.price !== null && prod.price !== "") {
+    const num = Number(prod.price);
+    if (!isNaN(num)) cleanPrice = num;
+  }
+  let availability = "available";
+  if (prod.availability === "out_of_stock") {
+    availability = "out_of_stock";
+  } else if (prod.availability === "pre_order") {
+    availability = "pre_order";
+  }
+  return {
+    id: prod.id,
+    slug: prod.slug || prod.id,
+    name_english: prod.nameEnglish || "Product",
+    name_marathi: prod.nameMarathi || prod.nameEnglish || "\u0909\u0924\u094D\u092A\u093E\u0926\u0928",
+    category_id: prod.categoryId || prod.category || "seeds",
+    subcategory_id: prod.subcategoryId || null,
+    description_english: prod.descriptionEnglish || "",
+    description_marathi: prod.descriptionMarathi || "",
+    image: prod.image || "/assets/products/seeds/seed_1.png",
+    image_url: prod.imageUrl || null,
+    price: cleanPrice,
+    availability,
+    featured: isFeatured,
+    is_bestseller: isFeatured,
+    popularity: typeof prod.popularity === "number" ? prod.popularity : 0,
+    display_order: typeof prod.displayOrder === "number" ? prod.displayOrder : 1,
+    is_sample: Boolean(prod.isSample),
+    key_points_english: Array.isArray(prod.keyPointsEnglish) ? prod.keyPointsEnglish : [],
+    key_points_marathi: Array.isArray(prod.keyPointsMarathi) ? prod.keyPointsMarathi : [],
+    suitable_crops_english: Array.isArray(prod.suitableCropsEnglish) ? prod.suitableCropsEnglish : [],
+    suitable_crops_marathi: Array.isArray(prod.suitableCropsMarathi) ? prod.suitableCropsMarathi : [],
+    translation_source: prod.translationSource || null,
+    custom_translation: Boolean(prod.customTranslation),
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapBrandFromDb(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    logo: row.logo,
+    order: typeof row.display_order === "number" ? row.display_order : 1
+  };
+}
+function mapBrandToDb(brand) {
+  return {
+    id: brand.id,
+    name: brand.name || "Brand",
+    logo: brand.logo || "",
+    display_order: typeof brand.order === "number" ? brand.order : 1,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapFieldVisitFromDb(row) {
+  return {
+    id: row.id,
+    titleEn: row.title_en,
+    titleMr: row.title_mr,
+    imageSrc: row.image_src,
+    altEn: row.alt_en || void 0,
+    altMr: row.alt_mr || void 0,
+    tagEn: row.tag_en || void 0,
+    tagMr: row.tag_mr || void 0,
+    descriptionEn: row.description_en || void 0,
+    descriptionMr: row.description_mr || void 0,
+    order: typeof row.display_order === "number" ? row.display_order : 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function mapFieldVisitToDb(visit) {
+  return {
+    id: visit.id,
+    title_en: visit.titleEn || "Field Guidance",
+    title_mr: visit.titleMr || visit.titleEn || "\u0936\u0947\u0924\u093E\u0924\u0940\u0932 \u092E\u093E\u0930\u094D\u0917\u0926\u0930\u094D\u0936\u0928",
+    image_src: visit.imageSrc || "/assets/visit/visit1.png",
+    alt_en: visit.altEn || null,
+    alt_mr: visit.altMr || null,
+    tag_en: visit.tagEn || null,
+    tag_mr: visit.tagMr || null,
+    description_en: visit.descriptionEn || null,
+    description_mr: visit.descriptionMr || null,
+    display_order: typeof visit.order === "number" ? visit.order : 1,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapFieldExperienceFromDb(row) {
+  return {
+    id: row.id,
+    cropKey: row.crop_key,
+    cropNameEnglish: row.crop_name_english,
+    cropNameMarathi: row.crop_name_marathi,
+    titleEnglish: row.title_english,
+    titleMarathi: row.title_marathi,
+    summaryEnglish: row.summary_english || "",
+    summaryMarathi: row.summary_marathi || "",
+    observationEnglish: row.observation_english || "",
+    observationMarathi: row.observation_marathi || "",
+    practiceEnglish: row.practice_english || "",
+    practiceMarathi: row.practice_marathi || "",
+    seasonEnglish: row.season_english || void 0,
+    seasonMarathi: row.season_marathi || void 0,
+    stageEnglish: row.stage_english || void 0,
+    stageMarathi: row.stage_marathi || void 0,
+    categoryKey: row.category_key || void 0,
+    isSample: Boolean(row.is_sample),
+    image: row.image || void 0,
+    relatedProductIds: Array.isArray(row.related_product_ids) ? row.related_product_ids : [],
+    keyInsightsEnglish: Array.isArray(row.key_insights_english) ? row.key_insights_english : [],
+    keyInsightsMarathi: Array.isArray(row.key_insights_marathi) ? row.key_insights_marathi : [],
+    translationSource: row.translation_source || void 0,
+    customTranslation: Boolean(row.custom_translation)
+  };
+}
+function mapFieldExperienceToDb(fe) {
+  return {
+    id: fe.id,
+    crop_key: fe.cropKey || "general",
+    crop_name_english: fe.cropNameEnglish || "General Crop",
+    crop_name_marathi: fe.cropNameMarathi || "\u0938\u093E\u092E\u093E\u0928\u094D\u092F \u092A\u0940\u0915",
+    title_english: fe.titleEnglish || "Field Advisory",
+    title_marathi: fe.titleMarathi || fe.titleEnglish || "\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E",
+    summary_english: fe.summaryEnglish || "",
+    summary_marathi: fe.summaryMarathi || "",
+    observation_english: fe.observationEnglish || "",
+    observation_marathi: fe.observationMarathi || "",
+    practice_english: fe.practiceEnglish || "",
+    practice_marathi: fe.practiceMarathi || "",
+    season_english: fe.seasonEnglish || null,
+    season_marathi: fe.seasonMarathi || null,
+    stage_english: fe.stageEnglish || null,
+    stage_marathi: fe.stageMarathi || null,
+    category_key: fe.categoryKey || null,
+    is_sample: Boolean(fe.isSample),
+    image: fe.image || null,
+    related_product_ids: Array.isArray(fe.relatedProductIds) ? fe.relatedProductIds : [],
+    key_insights_english: Array.isArray(fe.keyInsightsEnglish) ? fe.keyInsightsEnglish : [],
+    key_insights_marathi: Array.isArray(fe.keyInsightsMarathi) ? fe.keyInsightsMarathi : [],
+    translation_source: fe.translationSource || null,
+    custom_translation: Boolean(fe.customTranslation),
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapFarmerResultFromDb(row) {
+  return {
+    id: row.id,
+    image: row.image,
+    name: { en: row.name_en, mr: row.name_mr },
+    location: { en: row.location_en, mr: row.location_mr },
+    nameEn: row.name_en,
+    nameMr: row.name_mr,
+    locationEn: row.location_en,
+    locationMr: row.location_mr,
+    order: typeof row.display_order === "number" ? row.display_order : 1,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+function mapFarmerResultToDb(res) {
+  const nameEn = res.name?.en || res.nameEn || "Farmer Partner";
+  const nameMr = res.name?.mr || res.nameMr || "\u0936\u0947\u0924\u0915\u0930\u0940 \u092C\u093E\u0902\u0927\u0935";
+  const locEn = res.location?.en || res.locationEn || "Kaij Region";
+  const locMr = res.location?.mr || res.locationMr || "\u0915\u0948\u091C \u092A\u0930\u093F\u0938\u0930";
+  return {
+    id: res.id,
+    image: res.image || "/assets/result/1-himachal-variety-this-special-variety-from-himachal-pradesh-is-ideal-for-1723807624.jpg",
+    name_en: nameEn,
+    name_mr: nameMr,
+    location_en: locEn,
+    location_mr: locMr,
+    display_order: typeof res.order === "number" ? res.order : 1,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapBusinessInfoFromDb(row, fallback) {
+  return {
+    businessNameEn: row.name,
+    businessNameMr: row.name_mr,
+    taglineEn: fallback.taglineEn,
+    taglineMr: fallback.taglineMr,
+    ownerNameEn: row.proprietor,
+    ownerNameMr: row.proprietor_mr || row.proprietor,
+    nativePlaceEn: fallback.nativePlaceEn || "Janegaon",
+    nativePlaceMr: fallback.nativePlaceMr || "\u091C\u093E\u0928\u0947\u0917\u093E\u0935",
+    shopAddressEn: row.address,
+    shopAddressMr: row.address_mr || row.address,
+    phone: row.phone,
+    whatsapp: row.whatsapp,
+    email: row.email,
+    otherBusinessNameEn: fallback.otherBusinessNameEn,
+    otherBusinessNameMr: fallback.otherBusinessNameMr,
+    otherBusinessNoteEn: fallback.otherBusinessNoteEn,
+    otherBusinessNoteMr: fallback.otherBusinessNoteMr,
+    location: {
+      addressEn: row.address,
+      addressMr: row.address_mr || row.address,
+      cityEn: row.city,
+      cityMr: row.city === "Kaij" ? "\u0915\u0948\u091C" : row.city,
+      districtEn: row.district,
+      districtMr: row.district === "Beed" ? "\u092C\u0940\u0921" : row.district,
+      pincode: row.pincode,
+      latitude: Number(row.latitude) || 18.7042,
+      longitude: Number(row.longitude) || 75.9556,
+      googleMapsEmbedUrl: fallback.location?.googleMapsEmbedUrl,
+      googleMapsExternalUrl: row.google_maps_url || fallback.location?.googleMapsExternalUrl
+    },
+    social: {
+      whatsapp: row.whatsapp,
+      instagramUrl: fallback.social?.instagramUrl,
+      instagramHandle: fallback.social?.instagramHandle
+    }
+  };
+}
+function mapBusinessInfoToDb(info) {
+  const addrEn = info.location?.addressEn || info.shopAddressEn || "Manglagwar Peth, Kaij, Dist. Beed, Maharashtra \u2013 431123";
+  const addrMr = info.location?.addressMr || info.shopAddressMr || "\u092E\u0902\u0917\u0933\u0935\u093E\u0930 \u092A\u0947\u0920, \u0915\u0948\u091C, \u091C\u093F. \u092C\u0940\u0921, \u092E\u0939\u093E\u0930\u093E\u0937\u094D\u091F\u094D\u0930 \u2013 \u096A\u0969\u0967\u0967\u0968\u0969";
+  return {
+    id: "default_business_info",
+    name: info.businessNameEn || "Baliraja Krishi Seva Kendra",
+    name_mr: info.businessNameMr || "\u092C\u0933\u0940\u0930\u093E\u091C\u093E \u0915\u0943\u0937\u0940 \u0938\u0947\u0935\u093E \u0915\u0947\u0902\u0926\u094D\u0930",
+    proprietor: info.ownerNameEn || "Ganesh Shinde",
+    proprietor_mr: info.ownerNameMr || "\u0917\u0923\u0947\u0936 \u0936\u093F\u0902\u0926\u0947",
+    address: addrEn,
+    address_mr: addrMr,
+    city: info.location?.cityEn || "Kaij",
+    district: info.location?.districtEn || "Beed",
+    state: "Maharashtra",
+    pincode: info.location?.pincode || "431123",
+    phone: info.phone || "9881070520",
+    whatsapp: info.whatsapp || "9881070520",
+    email: info.email || "shinde.krishi.director@baliraja.in",
+    latitude: info.location?.latitude || 18.7042,
+    longitude: info.location?.longitude || 75.9556,
+    google_maps_url: info.location?.googleMapsExternalUrl || null,
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapOwnerProfileFromDb(row, fallback) {
+  return {
+    name: row.name,
+    nameMr: row.name_mr,
+    village: fallback.village || { en: "Janegaon", mr: "\u091C\u093E\u0928\u0947\u0917\u093E\u0935" },
+    role: { en: row.title, mr: row.title_mr },
+    bio: { en: row.bio_en, mr: row.bio_mr },
+    experience: {
+      en: row.education_en || fallback.experience?.en || "",
+      mr: row.education_mr || fallback.experience?.mr || ""
+    },
+    image: row.image,
+    isDemoContent: fallback.isDemoContent || false
+  };
+}
+function mapOwnerProfileToDb(profile) {
+  return {
+    id: "default_owner_profile",
+    name: profile.name || "Ganesh Shinde",
+    name_mr: profile.nameMr || "\u0917\u0923\u0947\u0936 \u0936\u093F\u0902\u0926\u0947",
+    title: profile.role?.en || "Owner / Proprietor",
+    title_mr: profile.role?.mr || "\u0938\u0902\u091A\u093E\u0932\u0915",
+    bio_en: profile.bio?.en || "",
+    bio_mr: profile.bio?.mr || "",
+    education_en: profile.experience?.en || null,
+    education_mr: profile.experience?.mr || null,
+    image: profile.image || "/assets/owner.png",
+    updated_at: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapAuditLogFromDb(row) {
+  return {
+    id: row.id,
+    actionEn: row.action_en,
+    actionMr: row.action_mr,
+    itemType: row.item_type,
+    performedBy: row.performed_by,
+    timestamp: row.timestamp
+  };
+}
+function mapAuditLogToDb(entry) {
+  return {
+    id: entry.id,
+    action_en: entry.actionEn,
+    action_mr: entry.actionMr,
+    item_type: entry.itemType,
+    performed_by: entry.performedBy,
+    timestamp: entry.timestamp || (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
 var ServerContentDatabase = class {
-  data;
+  localData;
   constructor() {
     this.ensureDirectory();
-    this.data = this.loadDatabase();
+    this.localData = this.loadLocalDatabase();
   }
   ensureDirectory() {
     try {
@@ -2632,16 +3073,16 @@ var ServerContentDatabase = class {
         fs3.mkdirSync(CONTENT_DIR, { recursive: true });
       }
     } catch (err) {
-      console.warn("[SERVER_CONTENT_DB] Content directory is read-only or not writable (operating in-memory mode):", err instanceof Error ? err.message : String(err));
+      console.warn("[SERVER_CONTENT_DB] Content directory is read-only or not writable (in-memory mode active):", err instanceof Error ? err.message : String(err));
     }
   }
-  loadDatabase() {
+  loadLocalDatabase() {
     try {
       if (fs3.existsSync(CONTENT_FILE)) {
         const raw = fs3.readFileSync(CONTENT_FILE, "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.categories)) {
-          this.data = {
+          this.localData = {
             products: parsed.products,
             categories: parsed.categories,
             brands: Array.isArray(parsed.brands) ? parsed.brands : [],
@@ -2654,22 +3095,22 @@ var ServerContentDatabase = class {
             version: parsed.version || 4,
             lastModified: parsed.lastModified || (/* @__PURE__ */ new Date()).toISOString()
           };
-          return this.data;
+          return this.localData;
         }
       }
     } catch (err) {
-      console.warn("[SERVER_CONTENT_DB] Error loading content database file, initializing defaults:", err instanceof Error ? err.message : String(err));
+      console.warn("[SERVER_CONTENT_DB] Error loading local content JSON file, initializing defaults:", err instanceof Error ? err.message : String(err));
     }
     const initial = initDefaultContent();
     try {
-      this.saveDatabaseSync(initial);
+      this.saveLocalDatabaseSync(initial);
     } catch (err) {
-      console.warn("[SERVER_CONTENT_DB] Could not persist initial content (read-only filesystem):", err instanceof Error ? err.message : String(err));
+      console.warn("[SERVER_CONTENT_DB] Could not persist initial local content (read-only filesystem):", err instanceof Error ? err.message : String(err));
     }
-    this.data = initial;
+    this.localData = initial;
     return initial;
   }
-  saveDatabaseSync(data) {
+  saveLocalDatabaseSync(data) {
     try {
       this.ensureDirectory();
       const tmpFile = `${CONTENT_FILE}.tmp_${Date.now()}`;
@@ -2679,11 +3120,11 @@ var ServerContentDatabase = class {
       console.warn("[SERVER_CONTENT_DB] Could not save content database file (in-memory state active):", err instanceof Error ? err.message : String(err));
     }
   }
-  persist() {
-    this.data.lastModified = (/* @__PURE__ */ new Date()).toISOString();
-    this.saveDatabaseSync(this.data);
+  persistLocal() {
+    this.localData.lastModified = (/* @__PURE__ */ new Date()).toISOString();
+    this.saveLocalDatabaseSync(this.localData);
   }
-  recordAudit(actionEn, actionMr, itemType, performedBy = "Administrator") {
+  async recordAudit(actionEn, actionMr, itemType, performedBy = "Administrator") {
     const entry = {
       id: `audit-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
@@ -2692,25 +3133,121 @@ var ServerContentDatabase = class {
       itemType,
       performedBy
     };
-    this.data.auditLog = [entry, ...this.data.auditLog || []].slice(0, 100);
+    this.localData.auditLog = [entry, ...this.localData.auditLog || []].slice(0, 100);
+    this.persistLocal();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("admin_audit_logs").insert(mapAuditLogToDb(entry));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Failed to record audit log to Supabase:", err);
+        }
+      }
+    }
   }
-  // --- Full Bundle ---
-  getAllContent() {
-    this.loadDatabase();
-    return JSON.parse(JSON.stringify(this.data));
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 1. FULL CONTENT BUNDLE
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getAllContent() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const [
+            catsRes,
+            prodsRes,
+            brandsRes,
+            visitsRes,
+            expsRes,
+            resultsRes,
+            bizRes,
+            ownerRes,
+            logsRes
+          ] = await Promise.all([
+            supabase.from("categories").select("*").order("display_order", { ascending: true }),
+            supabase.from("products").select("*").order("display_order", { ascending: true }),
+            supabase.from("brands").select("*").order("display_order", { ascending: true }),
+            supabase.from("field_visits").select("*").order("display_order", { ascending: true }),
+            supabase.from("field_experiences").select("*"),
+            supabase.from("farmer_results").select("*").order("display_order", { ascending: true }),
+            supabase.from("business_info").select("*").limit(1),
+            supabase.from("owner_profile").select("*").limit(1),
+            supabase.from("admin_audit_logs").select("*").order("timestamp", { ascending: false }).limit(50)
+          ]);
+          const hasData = catsRes.data && catsRes.data.length > 0 || prodsRes.data && prodsRes.data.length > 0;
+          if (hasData) {
+            const categories = (catsRes.data || []).map(mapCategoryFromDb);
+            const products = (prodsRes.data || []).map(mapProductFromDb);
+            const brands = (brandsRes.data || []).map(mapBrandFromDb);
+            const fieldVisits = (visitsRes.data || []).map(mapFieldVisitFromDb);
+            const fieldExperiences2 = (expsRes.data || []).map(mapFieldExperienceFromDb);
+            const results = (resultsRes.data || []).map(mapFarmerResultFromDb);
+            const businessInfo = bizRes.data && bizRes.data[0] ? mapBusinessInfoFromDb(bizRes.data[0], this.localData.businessInfo || verifiedBusinessInfo) : this.localData.businessInfo || verifiedBusinessInfo;
+            const ownerProfile2 = ownerRes.data && ownerRes.data[0] ? mapOwnerProfileFromDb(ownerRes.data[0], this.localData.ownerProfile || ownerProfile) : this.localData.ownerProfile || ownerProfile;
+            const auditLog = (logsRes.data || []).map(mapAuditLogFromDb);
+            return {
+              products,
+              categories,
+              brands,
+              fieldVisits,
+              fieldExperiences: fieldExperiences2,
+              results,
+              businessInfo,
+              ownerProfile: ownerProfile2,
+              auditLog,
+              version: 4,
+              lastModified: (/* @__PURE__ */ new Date()).toISOString()
+            };
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase query error in getAllContent, falling back to local storage:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return JSON.parse(JSON.stringify(this.localData));
   }
-  // --- Products ---
-  getProducts() {
-    this.loadDatabase();
-    return [...this.data.products];
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 2. PRODUCTS CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getProducts() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("products").select("*").order("display_order", { ascending: true });
+          if (!error && data && data.length > 0) {
+            return data.map(mapProductFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getProducts error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.products];
   }
-  getProductById(id) {
-    this.loadDatabase();
-    const p = this.data.products.find((prod) => prod.id === id);
+  async getProductById(id) {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("products").select("*").eq("id", id).maybeSingle();
+          if (!error && data) {
+            return mapProductFromDb(data);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getProductById error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    const p = this.localData.products.find((prod) => prod.id === id);
     return p ? { ...p } : null;
   }
-  createProduct(productData, performedBy) {
-    this.loadDatabase();
+  async createProduct(productData, performedBy) {
+    this.loadLocalDatabase();
     const id = productData.id || `prod-${Date.now()}`;
     const slug = productData.slug || productData.nameEnglish?.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || id;
     const rawImage = productData.image || productData.imageUrl || "/assets/products/seeds/seed_1.png";
@@ -2735,7 +3272,7 @@ var ServerContentDatabase = class {
       featured: Boolean(productData.featured || productData.isBestseller),
       isBestseller: Boolean(productData.isBestseller || productData.featured),
       popularity: typeof productData.popularity === "number" ? productData.popularity : 0,
-      displayOrder: typeof productData.displayOrder === "number" ? productData.displayOrder : this.data.products.length + 1,
+      displayOrder: typeof productData.displayOrder === "number" ? productData.displayOrder : this.localData.products.length + 1,
       isSample: Boolean(productData.isSample),
       keyPointsEnglish: Array.isArray(productData.keyPointsEnglish) ? productData.keyPointsEnglish : [],
       keyPointsMarathi: Array.isArray(productData.keyPointsMarathi) ? productData.keyPointsMarathi : [],
@@ -2744,21 +3281,31 @@ var ServerContentDatabase = class {
       translationSource: productData.translationSource,
       customTranslation: productData.customTranslation
     };
-    this.data.products.unshift(newProd);
-    this.recordAudit(
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const dbPayload = mapProductToDb(newProd);
+          await supabase.from("products").upsert(dbPayload);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createProduct error:", err);
+        }
+      }
+    }
+    this.localData.products.unshift(newProd);
+    await this.recordAudit(
       `Created product: ${newProd.nameEnglish}`,
       `\u0928\u0935\u0940\u0928 \u0909\u0924\u094D\u092A\u093E\u0926\u0928 \u091C\u094B\u0921\u0932\u0947: ${newProd.nameMarathi}`,
       "product",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return newProd;
   }
-  updateProduct(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.products.findIndex((p) => p.id === id);
-    if (idx === -1) return null;
-    const current = this.data.products[idx];
+  async updateProduct(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.products.findIndex((p) => p.id === id);
+    const current = idx !== -1 ? this.localData.products[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, "product");
@@ -2767,47 +3314,98 @@ var ServerContentDatabase = class {
       cleanUpdates.imageUrl = saveBase64ImageSync(cleanUpdates.imageUrl, "product");
     }
     const updated = {
-      ...current,
+      ...current || {},
       ...cleanUpdates,
-      id: current.id
-      // ID cannot be altered
+      id
     };
-    this.data.products[idx] = updated;
-    this.recordAudit(
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const dbPayload = mapProductToDb(updated);
+          await supabase.from("products").update(dbPayload).eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateProduct error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.products[idx] = updated;
+    } else {
+      this.localData.products.push(updated);
+    }
+    await this.recordAudit(
       `Updated product: ${updated.nameEnglish}`,
       `\u0909\u0924\u094D\u092A\u093E\u0926\u0928 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0947: ${updated.nameMarathi}`,
       "product",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return updated;
   }
-  deleteProduct(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.products.find((p) => p.id === id);
-    if (!existing) return false;
-    this.data.products = this.data.products.filter((p) => p.id !== id);
-    this.recordAudit(
-      `Deleted product: ${existing.nameEnglish} (ID: ${id})`,
-      `\u0909\u0924\u094D\u092A\u093E\u0926\u0928 \u0939\u091F\u0935\u0932\u0947: ${existing.nameMarathi} (\u0906\u092F\u0921\u0940: ${id})`,
+  async deleteProduct(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.products.find((p) => p.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("products").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteProduct error:", err);
+        }
+      }
+    }
+    this.localData.products = this.localData.products.filter((p) => p.id !== id);
+    await this.recordAudit(
+      `Deleted product: ${existing?.nameEnglish || id}`,
+      `\u0909\u0924\u094D\u092A\u093E\u0926\u0928 \u0939\u091F\u0935\u0932\u0947: ${existing?.nameMarathi || id}`,
       "product",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return true;
   }
-  // --- Categories ---
-  getCategories() {
-    this.loadDatabase();
-    return [...this.data.categories].sort((a, b) => (a.order || 0) - (b.order || 0));
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 3. CATEGORIES CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getCategories() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("categories").select("*").order("display_order", { ascending: true });
+          if (!error && data && data.length > 0) {
+            return data.map(mapCategoryFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getCategories error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.categories].sort((a, b) => (a.order || 0) - (b.order || 0));
   }
-  getCategoryById(id) {
-    this.loadDatabase();
-    const c = this.data.categories.find((cat) => cat.id === id || cat.slug === id);
+  async getCategoryById(id) {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("categories").select("*").or(`id.eq.${id},slug.eq.${id}`).maybeSingle();
+          if (!error && data) {
+            return mapCategoryFromDb(data);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getCategoryById error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    const c = this.localData.categories.find((cat) => cat.id === id || cat.slug === id);
     return c ? { ...c } : null;
   }
-  createCategory(catData, performedBy) {
-    this.loadDatabase();
+  async createCategory(catData, performedBy) {
+    this.loadLocalDatabase();
     const id = catData.id || `cat-${Date.now()}`;
     const slug = catData.slug || id;
     const rawImage = catData.image || "/assets/categories/seeds.png";
@@ -2824,77 +3422,136 @@ var ServerContentDatabase = class {
       subcategories: Array.isArray(catData.subcategories) ? catData.subcategories : [],
       highlight: Boolean(catData.highlight || catData.featured),
       featured: Boolean(catData.featured || catData.highlight),
-      order: typeof catData.order === "number" ? catData.order : this.data.categories.length + 1,
+      order: typeof catData.order === "number" ? catData.order : this.localData.categories.length + 1,
       active: catData.active !== false
     };
-    this.data.categories.push(newCat);
-    this.recordAudit(
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("categories").upsert(mapCategoryToDb(newCat));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createCategory error:", err);
+        }
+      }
+    }
+    this.localData.categories.push(newCat);
+    await this.recordAudit(
       `Created category: ${newCat.name}`,
       `\u0928\u0935\u0940\u0928 \u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0924\u092F\u093E\u0930 \u0915\u0947\u0932\u0940: ${newCat.nameMr}`,
       "category",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return newCat;
   }
-  updateCategory(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.categories.findIndex((c) => c.id === id || c.slug === id);
-    if (idx === -1) return null;
-    const current = this.data.categories[idx];
+  async updateCategory(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.categories.findIndex((c) => c.id === id || c.slug === id);
+    const current = idx !== -1 ? this.localData.categories[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, "category");
     }
     const updated = {
-      ...current,
+      ...current || {},
       ...cleanUpdates,
-      id: current.id
+      id
     };
-    this.data.categories[idx] = updated;
-    this.recordAudit(
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("categories").update(mapCategoryToDb(updated)).eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateCategory error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.categories[idx] = updated;
+    } else {
+      this.localData.categories.push(updated);
+    }
+    await this.recordAudit(
       `Updated category: ${updated.name}`,
       `\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.nameMr}`,
       "category",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return updated;
   }
-  deleteCategory(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.categories.find((c) => c.id === id);
-    if (!existing) return false;
-    this.data.categories = this.data.categories.filter((c) => c.id !== id);
-    this.recordAudit(
-      `Deleted category: ${existing.name}`,
-      `\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0939\u091F\u0935\u0932\u0940: ${existing.nameMr}`,
+  async deleteCategory(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.categories.find((c) => c.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("categories").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteCategory error:", err);
+        }
+      }
+    }
+    this.localData.categories = this.localData.categories.filter((c) => c.id !== id);
+    await this.recordAudit(
+      `Deleted category: ${existing?.name || id}`,
+      `\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0939\u091F\u0935\u0932\u0940: ${existing?.nameMr || id}`,
       "category",
       performedBy
     );
-    this.persist();
+    this.persistLocal();
     return true;
   }
-  reorderCategories(orderedIds, performedBy) {
-    this.loadDatabase();
+  async reorderCategories(orderedIds, performedBy) {
+    this.loadLocalDatabase();
     const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
-    this.data.categories.forEach((cat) => {
+    this.localData.categories.forEach((cat) => {
       if (orderMap.has(cat.id)) {
         cat.order = orderMap.get(cat.id);
       }
     });
-    this.data.categories.sort((a, b) => (a.order || 0) - (b.order || 0));
-    this.recordAudit("Reordered categories display sequence", "\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "category", performedBy);
-    this.persist();
+    this.localData.categories.sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          for (let i = 0; i < orderedIds.length; i++) {
+            await supabase.from("categories").update({ display_order: i + 1 }).eq("id", orderedIds[i]);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase reorderCategories error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Reordered categories display sequence", "\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "category", performedBy);
+    this.persistLocal();
     return this.getCategories();
   }
-  // --- Brands ---
-  getBrands() {
-    this.loadDatabase();
-    return [...this.data.brands].sort((a, b) => (a.order || 0) - (b.order || 0));
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 4. BRANDS CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getBrands() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("brands").select("*").order("display_order", { ascending: true });
+          if (!error && data && data.length > 0) {
+            return data.map(mapBrandFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getBrands error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.brands].sort((a, b) => (a.order || 0) - (b.order || 0));
   }
-  createBrand(brandData, performedBy) {
-    this.loadDatabase();
+  async createBrand(brandData, performedBy) {
+    this.loadLocalDatabase();
     const id = brandData.id || `brand-${Date.now()}`;
     const rawLogo = brandData.logo || "";
     const sanitizedLogo = saveBase64ImageSync(rawLogo, "brand");
@@ -2902,59 +3559,116 @@ var ServerContentDatabase = class {
       id,
       name: brandData.name || "New Brand",
       logo: sanitizedLogo,
-      order: typeof brandData.order === "number" ? brandData.order : this.data.brands.length + 1
+      order: typeof brandData.order === "number" ? brandData.order : this.localData.brands.length + 1
     };
-    this.data.brands.push(newBrand);
-    this.recordAudit(`Created brand: ${newBrand.name}`, `\u0928\u0935\u0940\u0928 \u092C\u094D\u0930\u0901\u0921 \u091C\u094B\u0921\u0932\u093E: ${newBrand.name}`, "brand", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("brands").upsert(mapBrandToDb(newBrand));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createBrand error:", err);
+        }
+      }
+    }
+    this.localData.brands.push(newBrand);
+    await this.recordAudit(`Created brand: ${newBrand.name}`, `\u0928\u0935\u0940\u0928 \u092C\u094D\u0930\u0901\u0921 \u091C\u094B\u0921\u0932\u093E: ${newBrand.name}`, "brand", performedBy);
+    this.persistLocal();
     return newBrand;
   }
-  updateBrand(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.brands.findIndex((b) => b.id === id);
-    if (idx === -1) {
-      return this.createBrand({ ...updates, id }, performedBy);
-    }
-    const current = this.data.brands[idx];
+  async updateBrand(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.brands.findIndex((b) => b.id === id);
+    const current = idx !== -1 ? this.localData.brands[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.logo) {
       cleanUpdates.logo = saveBase64ImageSync(cleanUpdates.logo, "brand");
     }
-    const updated = { ...current, ...cleanUpdates, id: current.id };
-    this.data.brands[idx] = updated;
-    this.recordAudit(`Updated brand: ${updated.name}`, `\u092C\u094D\u0930\u0901\u0921 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u093E: ${updated.name}`, "brand", performedBy);
-    this.persist();
+    const updated = { ...current || {}, ...cleanUpdates, id };
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("brands").upsert(mapBrandToDb(updated));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateBrand error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.brands[idx] = updated;
+    } else {
+      this.localData.brands.push(updated);
+    }
+    await this.recordAudit(`Updated brand: ${updated.name}`, `\u092C\u094D\u0930\u0901\u0921 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u093E: ${updated.name}`, "brand", performedBy);
+    this.persistLocal();
     return updated;
   }
-  deleteBrand(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.brands.find((b) => b.id === id);
-    if (!existing) return false;
-    this.data.brands = this.data.brands.filter((b) => b.id !== id);
-    this.recordAudit(`Deleted brand: ${existing.name}`, `\u092C\u094D\u0930\u0901\u0921 \u0939\u091F\u0935\u0932\u093E: ${existing.name}`, "brand", performedBy);
-    this.persist();
+  async deleteBrand(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.brands.find((b) => b.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("brands").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteBrand error:", err);
+        }
+      }
+    }
+    this.localData.brands = this.localData.brands.filter((b) => b.id !== id);
+    await this.recordAudit(`Deleted brand: ${existing?.name || id}`, `\u092C\u094D\u0930\u0901\u0921 \u0939\u091F\u0935\u0932\u093E: ${existing?.name || id}`, "brand", performedBy);
+    this.persistLocal();
     return true;
   }
-  reorderBrands(orderedIds, performedBy) {
-    this.loadDatabase();
+  async reorderBrands(orderedIds, performedBy) {
+    this.loadLocalDatabase();
     const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
-    this.data.brands.forEach((brand) => {
+    this.localData.brands.forEach((brand) => {
       if (orderMap.has(brand.id)) {
         brand.order = orderMap.get(brand.id);
       }
     });
-    this.data.brands.sort((a, b) => (a.order || 0) - (b.order || 0));
-    this.recordAudit("Reordered connected brands sequence", "\u092C\u094D\u0930\u0901\u0921\u094D\u0938 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "brand", performedBy);
-    this.persist();
+    this.localData.brands.sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          for (let i = 0; i < orderedIds.length; i++) {
+            await supabase.from("brands").update({ display_order: i + 1 }).eq("id", orderedIds[i]);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase reorderBrands error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Reordered connected brands sequence", "\u092C\u094D\u0930\u0901\u0921\u094D\u0938 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "brand", performedBy);
+    this.persistLocal();
     return this.getBrands();
   }
-  // --- Field Visits ---
-  getFieldVisits() {
-    this.loadDatabase();
-    return [...this.data.fieldVisits].sort((a, b) => (a.order || 0) - (b.order || 0));
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 5. FIELD VISITS CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getFieldVisits() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("field_visits").select("*").order("display_order", { ascending: true });
+          if (!error && data && data.length > 0) {
+            return data.map(mapFieldVisitFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getFieldVisits error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.fieldVisits].sort((a, b) => (a.order || 0) - (b.order || 0));
   }
-  createFieldVisit(visitData, performedBy) {
-    this.loadDatabase();
+  async createFieldVisit(visitData, performedBy) {
+    this.loadLocalDatabase();
     const id = visitData.id || `visit-${Date.now()}`;
     const rawImageSrc = visitData.imageSrc || "/assets/visit/visit1.png";
     const sanitizedImageSrc = saveBase64ImageSync(rawImageSrc, "visit");
@@ -2969,64 +3683,123 @@ var ServerContentDatabase = class {
       tagMr: visitData.tagMr,
       descriptionEn: visitData.descriptionEn,
       descriptionMr: visitData.descriptionMr,
-      order: typeof visitData.order === "number" ? visitData.order : this.data.fieldVisits.length + 1,
+      order: typeof visitData.order === "number" ? visitData.order : this.localData.fieldVisits.length + 1,
       createdAt: visitData.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.data.fieldVisits.unshift(newVisit);
-    this.recordAudit(`Added field visit record: ${newVisit.titleEn}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0928\u094B\u0902\u0926 \u091C\u094B\u0921\u0932\u0940: ${newVisit.titleMr}`, "field-visit", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_visits").upsert(mapFieldVisitToDb(newVisit));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createFieldVisit error:", err);
+        }
+      }
+    }
+    this.localData.fieldVisits.unshift(newVisit);
+    await this.recordAudit(`Added field visit record: ${newVisit.titleEn}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0928\u094B\u0902\u0926 \u091C\u094B\u0921\u0932\u0940: ${newVisit.titleMr}`, "field-visit", performedBy);
+    this.persistLocal();
     return newVisit;
   }
-  updateFieldVisit(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.fieldVisits.findIndex((v) => v.id === id);
-    if (idx === -1) return null;
-    const current = this.data.fieldVisits[idx];
+  async updateFieldVisit(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.fieldVisits.findIndex((v) => v.id === id);
+    const current = idx !== -1 ? this.localData.fieldVisits[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.imageSrc) {
       cleanUpdates.imageSrc = saveBase64ImageSync(cleanUpdates.imageSrc, "visit");
     }
     const updated = {
-      ...current,
+      ...current || {},
       ...cleanUpdates,
-      id: current.id,
+      id,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.data.fieldVisits[idx] = updated;
-    this.recordAudit(`Updated field visit: ${updated.titleEn}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.titleMr}`, "field-visit", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_visits").update(mapFieldVisitToDb(updated)).eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateFieldVisit error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.fieldVisits[idx] = updated;
+    } else {
+      this.localData.fieldVisits.push(updated);
+    }
+    await this.recordAudit(`Updated field visit: ${updated.titleEn}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.titleMr}`, "field-visit", performedBy);
+    this.persistLocal();
     return updated;
   }
-  deleteFieldVisit(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.fieldVisits.find((v) => v.id === id);
-    if (!existing) return false;
-    this.data.fieldVisits = this.data.fieldVisits.filter((v) => v.id !== id);
-    this.recordAudit(`Deleted field visit record: ${existing.titleEn}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0928\u094B\u0902\u0926 \u0939\u091F\u0935\u0932\u0940: ${existing.titleMr}`, "field-visit", performedBy);
-    this.persist();
+  async deleteFieldVisit(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.fieldVisits.find((v) => v.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_visits").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteFieldVisit error:", err);
+        }
+      }
+    }
+    this.localData.fieldVisits = this.localData.fieldVisits.filter((v) => v.id !== id);
+    await this.recordAudit(`Deleted field visit record: ${existing?.titleEn || id}`, `\u0936\u0947\u0924 \u092D\u0947\u091F \u0928\u094B\u0902\u0926 \u0939\u091F\u0935\u0932\u0940: ${existing?.titleMr || id}`, "field-visit", performedBy);
+    this.persistLocal();
     return true;
   }
-  reorderFieldVisits(orderedIds, performedBy) {
-    this.loadDatabase();
+  async reorderFieldVisits(orderedIds, performedBy) {
+    this.loadLocalDatabase();
     const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
-    this.data.fieldVisits.forEach((visit) => {
+    this.localData.fieldVisits.forEach((visit) => {
       if (orderMap.has(visit.id)) {
         visit.order = orderMap.get(visit.id);
       }
     });
-    this.data.fieldVisits.sort((a, b) => (a.order || 0) - (b.order || 0));
-    this.recordAudit("Reordered field visits gallery sequence", "\u0936\u0947\u0924 \u092D\u0947\u091F\u0940\u0902\u091A\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "field-visit", performedBy);
-    this.persist();
+    this.localData.fieldVisits.sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          for (let i = 0; i < orderedIds.length; i++) {
+            await supabase.from("field_visits").update({ display_order: i + 1 }).eq("id", orderedIds[i]);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase reorderFieldVisits error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Reordered field visits gallery sequence", "\u0936\u0947\u0924 \u092D\u0947\u091F\u0940\u0902\u091A\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "field-visit", performedBy);
+    this.persistLocal();
     return this.getFieldVisits();
   }
-  // --- Field Experiences ---
-  getFieldExperiences() {
-    this.loadDatabase();
-    return [...this.data.fieldExperiences];
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 6. FIELD EXPERIENCES CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getFieldExperiences() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("field_experiences").select("*");
+          if (!error && data && data.length > 0) {
+            return data.map(mapFieldExperienceFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getFieldExperiences error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.fieldExperiences];
   }
-  createFieldExperience(feData, performedBy) {
-    this.loadDatabase();
+  async createFieldExperience(feData, performedBy) {
+    this.loadLocalDatabase();
     const id = feData.id || `fe-${Date.now()}`;
     const rawImage = feData.image ? saveBase64ImageSync(feData.image, "fieldexp") : void 0;
     const newFe = {
@@ -3055,44 +3828,89 @@ var ServerContentDatabase = class {
       translationSource: feData.translationSource,
       customTranslation: feData.customTranslation
     };
-    this.data.fieldExperiences.unshift(newFe);
-    this.recordAudit(`Added field experience advisory: ${newFe.titleEnglish}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u091C\u094B\u0921\u0932\u0940: ${newFe.titleMarathi}`, "field-experience", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_experiences").upsert(mapFieldExperienceToDb(newFe));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createFieldExperience error:", err);
+        }
+      }
+    }
+    this.localData.fieldExperiences.unshift(newFe);
+    await this.recordAudit(`Added field experience advisory: ${newFe.titleEnglish}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u091C\u094B\u0921\u0932\u0940: ${newFe.titleMarathi}`, "field-experience", performedBy);
+    this.persistLocal();
     return newFe;
   }
-  updateFieldExperience(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.fieldExperiences.findIndex((fe) => fe.id === id);
-    if (idx === -1) {
-      return this.createFieldExperience({ ...updates, id }, performedBy);
-    }
-    const current = this.data.fieldExperiences[idx];
+  async updateFieldExperience(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.fieldExperiences.findIndex((fe) => fe.id === id);
+    const current = idx !== -1 ? this.localData.fieldExperiences[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, "fieldexp");
     }
-    const updated = { ...current, ...cleanUpdates, id: current.id };
-    this.data.fieldExperiences[idx] = updated;
-    this.recordAudit(`Updated field experience: ${updated.titleEnglish}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.titleMarathi}`, "field-experience", performedBy);
-    this.persist();
+    const updated = { ...current || {}, ...cleanUpdates, id };
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_experiences").upsert(mapFieldExperienceToDb(updated));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateFieldExperience error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.fieldExperiences[idx] = updated;
+    } else {
+      this.localData.fieldExperiences.push(updated);
+    }
+    await this.recordAudit(`Updated field experience: ${updated.titleEnglish}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.titleMarathi}`, "field-experience", performedBy);
+    this.persistLocal();
     return updated;
   }
-  deleteFieldExperience(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.fieldExperiences.find((fe) => fe.id === id);
-    if (!existing) return false;
-    this.data.fieldExperiences = this.data.fieldExperiences.filter((fe) => fe.id !== id);
-    this.recordAudit(`Deleted field experience: ${existing.titleEnglish}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u0939\u091F\u0935\u0932\u0940: ${existing.titleMarathi}`, "field-experience", performedBy);
-    this.persist();
+  async deleteFieldExperience(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.fieldExperiences.find((fe) => fe.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("field_experiences").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteFieldExperience error:", err);
+        }
+      }
+    }
+    this.localData.fieldExperiences = this.localData.fieldExperiences.filter((fe) => fe.id !== id);
+    await this.recordAudit(`Deleted field experience: ${existing?.titleEnglish || id}`, `\u0915\u0943\u0937\u0940 \u0938\u0932\u094D\u0932\u093E \u0928\u094B\u0902\u0926 \u0939\u091F\u0935\u0932\u0940: ${existing?.titleMarathi || id}`, "field-experience", performedBy);
+    this.persistLocal();
     return true;
   }
-  // --- Farmer Results ---
-  getResults() {
-    this.loadDatabase();
-    return [...this.data.results].sort((a, b) => (a.order || 0) - (b.order || 0));
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 7. FARMER RESULTS CRUD
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getResults() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("farmer_results").select("*").order("display_order", { ascending: true });
+          if (!error && data && data.length > 0) {
+            return data.map(mapFarmerResultFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getResults error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.results].sort((a, b) => (a.order || 0) - (b.order || 0));
   }
-  createResult(resData, performedBy) {
-    this.loadDatabase();
+  async createResult(resData, performedBy) {
+    this.loadLocalDatabase();
     const id = resData.id || `res-${Date.now()}`;
     const nameEn = resData.name?.en || resData.nameEn || "Progressive Farmer";
     const nameMr = resData.name?.mr || resData.nameMr || "\u0936\u0947\u0924\u0915\u0930\u0940 \u092C\u093E\u0902\u0927\u0935";
@@ -3103,46 +3921,47 @@ var ServerContentDatabase = class {
     const newRes = {
       id,
       image: sanitizedImage,
-      name: {
-        en: nameEn,
-        mr: nameMr
-      },
-      location: {
-        en: locEn,
-        mr: locMr
-      },
+      name: { en: nameEn, mr: nameMr },
+      location: { en: locEn, mr: locMr },
       nameEn,
       nameMr,
       locationEn: locEn,
       locationMr: locMr,
-      order: typeof resData.order === "number" ? resData.order : this.data.results.length + 1,
+      order: typeof resData.order === "number" ? resData.order : this.localData.results.length + 1,
       createdAt: resData.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.data.results.unshift(newRes);
-    this.recordAudit(`Added farmer success result: ${newRes.name.en}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u091C\u094B\u0921\u0932\u0940: ${newRes.name.mr}`, "result", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("farmer_results").upsert(mapFarmerResultToDb(newRes));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase createResult error:", err);
+        }
+      }
+    }
+    this.localData.results.unshift(newRes);
+    await this.recordAudit(`Added farmer success result: ${newRes.name.en}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u091C\u094B\u0921\u0932\u0940: ${newRes.name.mr}`, "result", performedBy);
+    this.persistLocal();
     return newRes;
   }
-  updateResult(id, updates, performedBy) {
-    this.loadDatabase();
-    const idx = this.data.results.findIndex((r) => r.id === id);
-    if (idx === -1) {
-      return this.createResult({ ...updates, id }, performedBy);
-    }
-    const current = this.data.results[idx];
+  async updateResult(id, updates, performedBy) {
+    this.loadLocalDatabase();
+    const idx = this.localData.results.findIndex((r) => r.id === id);
+    const current = idx !== -1 ? this.localData.results[idx] : null;
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, "result");
     }
-    const nameEn = cleanUpdates.name?.en || cleanUpdates.nameEn || current.name.en;
-    const nameMr = cleanUpdates.name?.mr || cleanUpdates.nameMr || current.name.mr;
-    const locEn = cleanUpdates.location?.en || cleanUpdates.locationEn || current.location.en;
-    const locMr = cleanUpdates.location?.mr || cleanUpdates.locationMr || current.location.mr;
+    const nameEn = cleanUpdates.name?.en || cleanUpdates.nameEn || current?.name.en || "Farmer Partner";
+    const nameMr = cleanUpdates.name?.mr || cleanUpdates.nameMr || current?.name.mr || "\u0936\u0947\u0924\u0915\u0930\u0940 \u092C\u093E\u0902\u0927\u0935";
+    const locEn = cleanUpdates.location?.en || cleanUpdates.locationEn || current?.location.en || "Kaij Region";
+    const locMr = cleanUpdates.location?.mr || cleanUpdates.locationMr || current?.location.mr || "\u0915\u0948\u091C \u092A\u0930\u093F\u0938\u0930";
     const updated = {
-      ...current,
+      ...current || {},
       ...cleanUpdates,
-      id: current.id,
+      id,
       name: { en: nameEn, mr: nameMr },
       location: { en: locEn, mr: locMr },
       nameEn,
@@ -3151,78 +3970,178 @@ var ServerContentDatabase = class {
       locationMr: locMr,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.data.results[idx] = updated;
-    this.recordAudit(`Updated farmer result: ${updated.name.en}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.name.mr}`, "result", performedBy);
-    this.persist();
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("farmer_results").upsert(mapFarmerResultToDb(updated));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateResult error:", err);
+        }
+      }
+    }
+    if (idx !== -1) {
+      this.localData.results[idx] = updated;
+    } else {
+      this.localData.results.push(updated);
+    }
+    await this.recordAudit(`Updated farmer result: ${updated.name.en}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940: ${updated.name.mr}`, "result", performedBy);
+    this.persistLocal();
     return updated;
   }
-  deleteResult(id, performedBy) {
-    this.loadDatabase();
-    const existing = this.data.results.find((r) => r.id === id);
-    if (!existing) return false;
-    this.data.results = this.data.results.filter((r) => r.id !== id);
-    this.recordAudit(`Deleted farmer result: ${existing.name.en}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u0939\u091F\u0935\u0932\u0940: ${existing.name.mr}`, "result", performedBy);
-    this.persist();
+  async deleteResult(id, performedBy) {
+    this.loadLocalDatabase();
+    const existing = this.localData.results.find((r) => r.id === id);
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("farmer_results").delete().eq("id", id);
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase deleteResult error:", err);
+        }
+      }
+    }
+    this.localData.results = this.localData.results.filter((r) => r.id !== id);
+    await this.recordAudit(`Deleted farmer result: ${existing?.name.en || id}`, `\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E \u0939\u091F\u0935\u0932\u0940: ${existing?.name.mr || id}`, "result", performedBy);
+    this.persistLocal();
     return true;
   }
-  reorderResults(orderedIds, performedBy) {
-    this.loadDatabase();
+  async reorderResults(orderedIds, performedBy) {
+    this.loadLocalDatabase();
     const orderMap = new Map(orderedIds.map((id, idx) => [id, idx + 1]));
-    this.data.results.forEach((res) => {
+    this.localData.results.forEach((res) => {
       if (orderMap.has(res.id)) {
         res.order = orderMap.get(res.id);
       }
     });
-    this.data.results.sort((a, b) => (a.order || 0) - (b.order || 0));
-    this.recordAudit("Reordered farmer results showcase sequence", "\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E\u0902\u091A\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "result", performedBy);
-    this.persist();
+    this.localData.results.sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          for (let i = 0; i < orderedIds.length; i++) {
+            await supabase.from("farmer_results").update({ display_order: i + 1 }).eq("id", orderedIds[i]);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase reorderResults error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Reordered farmer results showcase sequence", "\u0936\u0947\u0924\u0915\u0930\u0940 \u092F\u0936\u094B\u0917\u093E\u0925\u093E\u0902\u091A\u0940 \u0915\u094D\u0930\u092E\u0935\u093E\u0930\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "result", performedBy);
+    this.persistLocal();
     return this.getResults();
   }
-  // --- Business Info & Owner Profile ---
-  getBusinessInfo() {
-    this.loadDatabase();
-    return { ...this.data.businessInfo };
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 8. BUSINESS INFO & OWNER PROFILE
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getBusinessInfo() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("business_info").select("*").limit(1);
+          if (!error && data && data.length > 0) {
+            return mapBusinessInfoFromDb(data[0], this.localData.businessInfo || verifiedBusinessInfo);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getBusinessInfo error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return { ...this.localData.businessInfo };
   }
-  updateBusinessInfo(info, performedBy) {
-    this.loadDatabase();
-    this.data.businessInfo = { ...this.data.businessInfo, ...info };
-    this.recordAudit("Updated verified business and contact info", "\u0935\u094D\u092F\u0935\u0938\u093E\u092F \u0935 \u0938\u0902\u092A\u0930\u094D\u0915 \u092E\u093E\u0939\u093F\u0924\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "contact", performedBy);
-    this.persist();
+  async updateBusinessInfo(info, performedBy) {
+    this.loadLocalDatabase();
+    this.localData.businessInfo = { ...this.localData.businessInfo, ...info };
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("business_info").upsert(mapBusinessInfoToDb(this.localData.businessInfo));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateBusinessInfo error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Updated verified business and contact info", "\u0935\u094D\u092F\u0935\u0938\u093E\u092F \u0935 \u0938\u0902\u092A\u0930\u094D\u0915 \u092E\u093E\u0939\u093F\u0924\u0940 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0940", "contact", performedBy);
+    this.persistLocal();
     return this.getBusinessInfo();
   }
-  getOwnerProfile() {
-    this.loadDatabase();
-    return { ...this.data.ownerProfile };
+  async getOwnerProfile() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("owner_profile").select("*").limit(1);
+          if (!error && data && data.length > 0) {
+            return mapOwnerProfileFromDb(data[0], this.localData.ownerProfile || ownerProfile);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getOwnerProfile error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return { ...this.localData.ownerProfile };
   }
-  updateOwnerProfile(profile, performedBy) {
-    this.loadDatabase();
+  async updateOwnerProfile(profile, performedBy) {
+    this.loadLocalDatabase();
     const cleanProfile = { ...profile };
     if (cleanProfile.image) {
       cleanProfile.image = saveBase64ImageSync(cleanProfile.image, "owner");
     }
-    this.data.ownerProfile = { ...this.data.ownerProfile, ...cleanProfile };
-    this.recordAudit("Updated founder profile & agronomy credentials", "\u0938\u0902\u0938\u094D\u0925\u093E\u092A\u0915 \u092A\u094D\u0930\u094B\u092B\u093E\u0907\u0932 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0947", "about", performedBy);
-    this.persist();
+    this.localData.ownerProfile = { ...this.localData.ownerProfile, ...cleanProfile };
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          await supabase.from("owner_profile").upsert(mapOwnerProfileToDb(this.localData.ownerProfile));
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase updateOwnerProfile error:", err);
+        }
+      }
+    }
+    await this.recordAudit("Updated founder profile & agronomy credentials", "\u0938\u0902\u0938\u094D\u0925\u093E\u092A\u0915 \u092A\u094D\u0930\u094B\u092B\u093E\u0907\u0932 \u0905\u0926\u094D\u092F\u0924\u0928\u093F\u0924 \u0915\u0947\u0932\u0947", "about", performedBy);
+    this.persistLocal();
     return this.getOwnerProfile();
   }
-  // --- Audit Log ---
-  getAuditLog() {
-    this.loadDatabase();
-    return [...this.data.auditLog || []];
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 9. AUDIT LOG
+  // ═════════════════════════════════════════════════════════════════════════════
+  async getAuditLog() {
+    if (isSupabaseServerConfigured()) {
+      const supabase = getSupabaseAdmin();
+      if (supabase) {
+        try {
+          const { data, error } = await supabase.from("admin_audit_logs").select("*").order("timestamp", { ascending: false }).limit(100);
+          if (!error && data && data.length > 0) {
+            return data.map(mapAuditLogFromDb);
+          }
+        } catch (err) {
+          console.warn("[SERVER_CONTENT_DB] Supabase getAuditLog error:", err);
+        }
+      }
+    }
+    this.loadLocalDatabase();
+    return [...this.localData.auditLog || []];
   }
-  // --- Reset & Backup ---
-  resetToDefaults(performedBy) {
-    this.data = initDefaultContent();
-    this.recordAudit("Reset all content to verified initial agricultural catalog defaults", "\u0938\u0930\u094D\u0935 \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u0938\u0941\u0930\u0941\u0935\u093E\u0924\u0940\u091A\u094D\u092F\u093E \u092A\u094D\u0930\u092E\u093E\u0923\u093F\u0924 \u0938\u094D\u0925\u093F\u0924\u0940\u0924 \u092A\u0941\u0928\u0930\u094D\u0938\u0902\u091A\u092F\u093F\u0924 \u0915\u0947\u0932\u0940", "system", performedBy);
-    this.persist();
+  // ═════════════════════════════════════════════════════════════════════════════
+  // 10. RESET & BACKUP UTILITIES
+  // ═════════════════════════════════════════════════════════════════════════════
+  async resetToDefaults(performedBy) {
+    this.localData = initDefaultContent();
+    await this.recordAudit("Reset all content to verified initial agricultural catalog defaults", "\u0938\u0930\u094D\u0935 \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u0938\u0941\u0930\u0941\u0935\u093E\u0924\u0940\u091A\u094D\u092F\u093E \u092A\u094D\u0930\u092E\u093E\u0923\u093F\u0924 \u0938\u094D\u0925\u093F\u0924\u0940\u0924 \u092A\u0941\u0928\u0930\u094D\u0938\u0902\u091A\u092F\u093F\u0924 \u0915\u0947\u0932\u0940", "system", performedBy);
+    this.persistLocal();
     return this.getAllContent();
   }
-  importBackup(parsed, performedBy) {
+  async importBackup(parsed, performedBy) {
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.products)) {
       return { success: false, error: "Invalid backup file: Missing products array." };
     }
     const sanitized = this.sanitizeImportedContent(parsed);
-    this.data = {
+    this.localData = {
       products: sanitized.products,
       categories: Array.isArray(sanitized.categories) ? sanitized.categories : defaultCategories,
       brands: Array.isArray(sanitized.brands) ? sanitized.brands : [],
@@ -3235,8 +4154,8 @@ var ServerContentDatabase = class {
       version: sanitized.version || 4,
       lastModified: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.recordAudit("Restored content database from JSON backup file", "JSON \u092C\u0945\u0915\u0905\u092A\u092E\u0927\u0942\u0928 \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u092A\u0941\u0928\u0930\u094D\u0938\u094D\u0925\u093E\u092A\u093F\u0924 \u0915\u0947\u0932\u093E", "system", performedBy);
-    this.persist();
+    await this.recordAudit("Restored content database from JSON backup file", "JSON \u092C\u0945\u0915\u0905\u092A\u092E\u0927\u0942\u0928 \u0938\u093E\u092E\u0917\u094D\u0930\u0940 \u0921\u0947\u091F\u093E\u092C\u0947\u0938 \u092A\u0941\u0928\u0930\u094D\u0938\u094D\u0925\u093E\u092A\u093F\u0924 \u0915\u0947\u0932\u093E", "system", performedBy);
+    this.persistLocal();
     return { success: true };
   }
   sanitizeImportedContent(parsed) {
@@ -3267,19 +4186,19 @@ var ServerContentDatabase = class {
         imageSrc: v.imageSrc ? saveBase64ImageSync(v.imageSrc, "visit") : v.imageSrc
       }));
     }
-    if (Array.isArray(cloned.fieldExperiences)) {
-      cloned.fieldExperiences = cloned.fieldExperiences.map((f) => ({
-        ...f,
-        image: f.image ? saveBase64ImageSync(f.image, "fieldexp") : f.image
-      }));
-    }
     if (Array.isArray(cloned.results)) {
       cloned.results = cloned.results.map((r) => ({
         ...r,
         image: r.image ? saveBase64ImageSync(r.image, "result") : r.image
       }));
     }
-    if (cloned.ownerProfile && typeof cloned.ownerProfile === "object" && cloned.ownerProfile.image) {
+    if (Array.isArray(cloned.fieldExperiences)) {
+      cloned.fieldExperiences = cloned.fieldExperiences.map((f) => ({
+        ...f,
+        image: f.image ? saveBase64ImageSync(f.image, "fieldexp") : f.image
+      }));
+    }
+    if (cloned.ownerProfile?.image) {
       cloned.ownerProfile.image = saveBase64ImageSync(cloned.ownerProfile.image, "owner");
     }
     return cloned;
@@ -3370,10 +4289,10 @@ function sanitizeString(val, maxLen = 5e3) {
   if (typeof val !== "string") return "";
   return val.trim().slice(0, maxLen);
 }
-contentRouter.get("/", (req, res) => {
+contentRouter.get("/", async (req, res) => {
   const startTime = Date.now();
   try {
-    const data = serverContentDb.getAllContent();
+    const data = await serverContentDb.getAllContent();
     const durationMs = Date.now() - startTime;
     console.log(`[DIAGNOSTIC_CONTENT_GET] Path: ${req.originalUrl || req.url} | Status: 200 | Products: ${data?.products?.length ?? 0} | Categories: ${data?.categories?.length ?? 0} | Duration: ${durationMs}ms`);
     res.json({ success: true, data });
@@ -3390,366 +4309,577 @@ contentRouter.get("/", (req, res) => {
     });
   }
 });
-contentRouter.post("/reset", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const data = serverContentDb.resetToDefaults(performedBy);
-  res.json({ success: true, messageEn: "Content reset to verified defaults", data });
-});
-contentRouter.post("/import", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const result = serverContentDb.importBackup(req.body, performedBy);
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
+contentRouter.post("/reset", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const data = await serverContentDb.resetToDefaults(performedBy);
+    res.json({ success: true, messageEn: "Content reset to verified defaults", data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Reset failed: ${msg}` });
   }
-  res.json({ success: true, data: serverContentDb.getAllContent() });
 });
-contentRouter.get("/export", requireAdminAuth, (_req, res) => {
-  const data = serverContentDb.getAllContent();
-  res.json(data);
-});
-contentRouter.get("/audit-log", requireAdminAuth, (_req, res) => {
-  const data = serverContentDb.getAuditLog();
-  res.json({ success: true, data });
-});
-contentRouter.get("/products", (_req, res) => {
-  const products = serverContentDb.getProducts();
-  res.json({ success: true, data: products });
-});
-contentRouter.get("/products/:id", (req, res) => {
-  const id = getParamId(req);
-  const product = serverContentDb.getProductById(id);
-  if (!product) {
-    res.status(404).json({ success: false, errorEn: "Product not found" });
-    return;
+contentRouter.post("/import", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const result = await serverContentDb.importBackup(req.body, performedBy);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    const all = await serverContentDb.getAllContent();
+    res.json({ success: true, data: all });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Import failed: ${msg}` });
   }
-  res.json({ success: true, data: product });
 });
-contentRouter.post("/products", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const body = req.body || {};
-  const nameEnglish = sanitizeString(body.nameEnglish, 250);
-  const nameMarathi = sanitizeString(body.nameMarathi, 250);
-  if (!nameEnglish && !nameMarathi) {
-    res.status(400).json({ success: false, errorEn: "Product name in English or Marathi is required" });
-    return;
+contentRouter.get("/export", requireAdminAuth, async (_req, res) => {
+  try {
+    const data = await serverContentDb.getAllContent();
+    res.json(data);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Export failed: ${msg}` });
   }
-  const created = serverContentDb.createProduct(body, performedBy);
-  res.status(201).json({ success: true, data: created });
 });
-contentRouter.put("/products/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateProduct(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: "Product not found" });
-    return;
+contentRouter.get("/audit-log", requireAdminAuth, async (_req, res) => {
+  try {
+    const data = await serverContentDb.getAuditLog();
+    res.json({ success: true, data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Audit log retrieval failed: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
-contentRouter.patch("/products/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateProduct(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: "Product not found" });
-    return;
+contentRouter.get("/products", async (_req, res) => {
+  try {
+    const products = await serverContentDb.getProducts();
+    res.json({ success: true, data: products });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get products: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
-contentRouter.delete("/products/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteProduct(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Product not found" });
-    return;
+contentRouter.get("/products/:id", async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const product = await serverContentDb.getProductById(id);
+    if (!product) {
+      res.status(404).json({ success: false, errorEn: "Product not found" });
+      return;
+    }
+    res.json({ success: true, data: product });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get product: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.get("/categories", (_req, res) => {
-  const categories = serverContentDb.getCategories();
-  res.json({ success: true, data: categories });
-});
-contentRouter.get("/categories/:id", (req, res) => {
-  const id = getParamId(req);
-  const category = serverContentDb.getCategoryById(id);
-  if (!category) {
-    res.status(404).json({ success: false, errorEn: "Category not found" });
-    return;
+contentRouter.post("/products", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const body = req.body || {};
+    const nameEnglish = sanitizeString(body.nameEnglish, 250);
+    const nameMarathi = sanitizeString(body.nameMarathi, 250);
+    if (!nameEnglish && !nameMarathi) {
+      res.status(400).json({ success: false, errorEn: "Product name in English or Marathi is required" });
+      return;
+    }
+    const created = await serverContentDb.createProduct(body, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create product: ${msg}` });
   }
-  res.json({ success: true, data: category });
 });
-contentRouter.post("/categories", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const body = req.body || {};
-  const name = sanitizeString(body.name, 150);
-  if (!name) {
-    res.status(400).json({ success: false, errorEn: "Category name is required" });
-    return;
+contentRouter.put("/products/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateProduct(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: "Product not found" });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update product: ${msg}` });
   }
-  const created = serverContentDb.createCategory(body, performedBy);
-  res.status(201).json({ success: true, data: created });
 });
-contentRouter.put("/categories/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateCategory(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: "Category not found" });
-    return;
+contentRouter.patch("/products/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateProduct(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: "Product not found" });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to patch product: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
-contentRouter.patch("/categories/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateCategory(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: "Category not found" });
-    return;
+contentRouter.delete("/products/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteProduct(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Product not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete product: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
-contentRouter.delete("/categories/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteCategory(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Category not found" });
-    return;
+contentRouter.get("/categories", async (_req, res) => {
+  try {
+    const categories = await serverContentDb.getCategories();
+    res.json({ success: true, data: categories });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get categories: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.post("/categories/reorder", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: "orderedIds must be an array of category IDs" });
-    return;
+contentRouter.get("/categories/:id", async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const category = await serverContentDb.getCategoryById(id);
+    if (!category) {
+      res.status(404).json({ success: false, errorEn: "Category not found" });
+      return;
+    }
+    res.json({ success: true, data: category });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get category: ${msg}` });
   }
-  const categories = serverContentDb.reorderCategories(orderedIds, performedBy);
-  res.json({ success: true, data: categories });
 });
-contentRouter.get("/brands", (_req, res) => {
-  const brands = serverContentDb.getBrands();
-  res.json({ success: true, data: brands });
-});
-contentRouter.post("/brands", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const created = serverContentDb.createBrand(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-contentRouter.put("/brands/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateBrand(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-contentRouter.delete("/brands/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteBrand(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Brand not found" });
-    return;
+contentRouter.post("/categories", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const body = req.body || {};
+    const name = sanitizeString(body.name, 150);
+    if (!name) {
+      res.status(400).json({ success: false, errorEn: "Category name is required" });
+      return;
+    }
+    const created = await serverContentDb.createCategory(body, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create category: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.post("/brands/reorder", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: "orderedIds must be an array of brand IDs" });
-    return;
+contentRouter.put("/categories/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateCategory(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: "Category not found" });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update category: ${msg}` });
   }
-  const brands = serverContentDb.reorderBrands(orderedIds, performedBy);
-  res.json({ success: true, data: brands });
 });
-contentRouter.get("/field-visits", (_req, res) => {
-  const visits = serverContentDb.getFieldVisits();
-  res.json({ success: true, data: visits });
-});
-contentRouter.post("/field-visits", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const created = serverContentDb.createFieldVisit(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-contentRouter.put("/field-visits/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateFieldVisit(id, req.body || {}, performedBy);
-  if (!updated) {
-    res.status(404).json({ success: false, errorEn: "Field visit not found" });
-    return;
+contentRouter.patch("/categories/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateCategory(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: "Category not found" });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to patch category: ${msg}` });
   }
-  res.json({ success: true, data: updated });
 });
-contentRouter.delete("/field-visits/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteFieldVisit(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Field visit not found" });
-    return;
+contentRouter.delete("/categories/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteCategory(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Category not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete category: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.post("/field-visits/reorder", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: "orderedIds must be an array of visit IDs" });
-    return;
+contentRouter.post("/categories/reorder", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: "orderedIds must be an array of category IDs" });
+      return;
+    }
+    const categories = await serverContentDb.reorderCategories(orderedIds, performedBy);
+    res.json({ success: true, data: categories });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder categories: ${msg}` });
   }
-  const visits = serverContentDb.reorderFieldVisits(orderedIds, performedBy);
-  res.json({ success: true, data: visits });
 });
-contentRouter.get("/field-experiences", (_req, res) => {
-  const data = serverContentDb.getFieldExperiences();
-  res.json({ success: true, data });
-});
-contentRouter.post("/field-experiences", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const created = serverContentDb.createFieldExperience(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-contentRouter.put("/field-experiences/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateFieldExperience(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-contentRouter.delete("/field-experiences/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteFieldExperience(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Field experience not found" });
-    return;
+contentRouter.get("/brands", async (_req, res) => {
+  try {
+    const brands = await serverContentDb.getBrands();
+    res.json({ success: true, data: brands });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get brands: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.get("/results", (_req, res) => {
-  const results = serverContentDb.getResults();
-  res.json({ success: true, data: results });
-});
-contentRouter.post("/results", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const created = serverContentDb.createResult(req.body || {}, performedBy);
-  res.status(201).json({ success: true, data: created });
-});
-contentRouter.put("/results/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateResult(id, req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
-});
-contentRouter.delete("/results/:id", requireAdminAuth, requireCsrf, (req, res) => {
-  const id = getParamId(req);
-  const performedBy = req.adminUser?.name || "Administrator";
-  const deleted = serverContentDb.deleteResult(id, performedBy);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "Result not found" });
-    return;
+contentRouter.post("/brands", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const created = await serverContentDb.createBrand(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create brand: ${msg}` });
   }
-  res.json({ success: true });
 });
-contentRouter.post("/results/reorder", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const { orderedIds } = req.body || {};
-  if (!Array.isArray(orderedIds)) {
-    res.status(400).json({ success: false, errorEn: "orderedIds must be an array of result IDs" });
-    return;
+contentRouter.put("/brands/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateBrand(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update brand: ${msg}` });
   }
-  const results = serverContentDb.reorderResults(orderedIds, performedBy);
-  res.json({ success: true, data: results });
 });
-contentRouter.get("/business-info", (_req, res) => {
-  const businessInfo = serverContentDb.getBusinessInfo();
-  res.json({ success: true, data: businessInfo });
+contentRouter.delete("/brands/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteBrand(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Brand not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete brand: ${msg}` });
+  }
 });
-contentRouter.put("/business-info", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateBusinessInfo(req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
+contentRouter.post("/brands/reorder", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: "orderedIds must be an array of brand IDs" });
+      return;
+    }
+    const brands = await serverContentDb.reorderBrands(orderedIds, performedBy);
+    res.json({ success: true, data: brands });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder brands: ${msg}` });
+  }
 });
-contentRouter.get("/owner-profile", (_req, res) => {
-  const ownerProfile2 = serverContentDb.getOwnerProfile();
-  res.json({ success: true, data: ownerProfile2 });
+contentRouter.get("/field-visits", async (_req, res) => {
+  try {
+    const visits = await serverContentDb.getFieldVisits();
+    res.json({ success: true, data: visits });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get field visits: ${msg}` });
+  }
 });
-contentRouter.put("/owner-profile", requireAdminAuth, requireCsrf, (req, res) => {
-  const performedBy = req.adminUser?.name || "Administrator";
-  const updated = serverContentDb.updateOwnerProfile(req.body || {}, performedBy);
-  res.json({ success: true, data: updated });
+contentRouter.post("/field-visits", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const created = await serverContentDb.createFieldVisit(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create field visit: ${msg}` });
+  }
+});
+contentRouter.put("/field-visits/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateFieldVisit(id, req.body || {}, performedBy);
+    if (!updated) {
+      res.status(404).json({ success: false, errorEn: "Field visit not found" });
+      return;
+    }
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update field visit: ${msg}` });
+  }
+});
+contentRouter.delete("/field-visits/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteFieldVisit(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Field visit not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete field visit: ${msg}` });
+  }
+});
+contentRouter.post("/field-visits/reorder", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: "orderedIds must be an array of visit IDs" });
+      return;
+    }
+    const visits = await serverContentDb.reorderFieldVisits(orderedIds, performedBy);
+    res.json({ success: true, data: visits });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder field visits: ${msg}` });
+  }
+});
+contentRouter.get("/field-experiences", async (_req, res) => {
+  try {
+    const data = await serverContentDb.getFieldExperiences();
+    res.json({ success: true, data });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get field experiences: ${msg}` });
+  }
+});
+contentRouter.post("/field-experiences", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const created = await serverContentDb.createFieldExperience(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create field experience: ${msg}` });
+  }
+});
+contentRouter.put("/field-experiences/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateFieldExperience(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update field experience: ${msg}` });
+  }
+});
+contentRouter.delete("/field-experiences/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteFieldExperience(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Field experience not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete field experience: ${msg}` });
+  }
+});
+contentRouter.get("/results", async (_req, res) => {
+  try {
+    const results = await serverContentDb.getResults();
+    res.json({ success: true, data: results });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get results: ${msg}` });
+  }
+});
+contentRouter.post("/results", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const created = await serverContentDb.createResult(req.body || {}, performedBy);
+    res.status(201).json({ success: true, data: created });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to create result: ${msg}` });
+  }
+});
+contentRouter.put("/results/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateResult(id, req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update result: ${msg}` });
+  }
+});
+contentRouter.delete("/results/:id", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const id = getParamId(req);
+    const performedBy = req.adminUser?.name || "Administrator";
+    const deleted = await serverContentDb.deleteResult(id, performedBy);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "Result not found" });
+      return;
+    }
+    res.json({ success: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete result: ${msg}` });
+  }
+});
+contentRouter.post("/results/reorder", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      res.status(400).json({ success: false, errorEn: "orderedIds must be an array of result IDs" });
+      return;
+    }
+    const results = await serverContentDb.reorderResults(orderedIds, performedBy);
+    res.json({ success: true, data: results });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to reorder results: ${msg}` });
+  }
+});
+contentRouter.get("/business-info", async (_req, res) => {
+  try {
+    const businessInfo = await serverContentDb.getBusinessInfo();
+    res.json({ success: true, data: businessInfo });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get business info: ${msg}` });
+  }
+});
+contentRouter.put("/business-info", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateBusinessInfo(req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update business info: ${msg}` });
+  }
+});
+contentRouter.get("/owner-profile", async (_req, res) => {
+  try {
+    const ownerProfile2 = await serverContentDb.getOwnerProfile();
+    res.json({ success: true, data: ownerProfile2 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to get owner profile: ${msg}` });
+  }
+});
+contentRouter.put("/owner-profile", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const performedBy = req.adminUser?.name || "Administrator";
+    const updated = await serverContentDb.updateOwnerProfile(req.body || {}, performedBy);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to update owner profile: ${msg}` });
+  }
 });
 contentRouter.post("/upload", requireAdminAuth, requireCsrf, async (req, res) => {
-  const { image, dataUrl, prefix = "upload" } = req.body || {};
-  const payload = image || dataUrl;
-  if (!payload || typeof payload !== "string") {
-    res.status(400).json({
-      success: false,
-      errorEn: "Missing image payload. Please provide a valid Base64 data URL.",
-      errorMr: "\u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0921\u0947\u091F\u093E \u0917\u0939\u093E\u0933 \u0906\u0939\u0947. \u0915\u0943\u092A\u092F\u093E \u0935\u0948\u0927 \u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0921\u0947\u091F\u093E \u0928\u093F\u0935\u0921\u093E."
-    });
-    return;
+  try {
+    const { image, dataUrl, prefix = "upload" } = req.body || {};
+    const payload = image || dataUrl;
+    if (!payload || typeof payload !== "string") {
+      res.status(400).json({
+        success: false,
+        errorEn: "Missing image payload. Please provide a valid Base64 data URL.",
+        errorMr: "\u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0921\u0947\u091F\u093E \u0917\u0939\u093E\u0933 \u0906\u0939\u0947. \u0915\u0943\u092A\u092F\u093E \u0935\u0948\u0927 \u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0921\u0947\u091F\u093E \u0928\u093F\u0935\u0921\u093E."
+      });
+      return;
+    }
+    const result = await saveBase64Image(payload, String(prefix));
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    const performedBy = req.adminUser?.name || "Administrator";
+    await serverContentDb.recordAudit(
+      `Uploaded media asset: ${result.filename} (${((result.size || 0) / 1024).toFixed(1)} KB)`,
+      `\u092E\u0940\u0921\u093F\u092F\u093E \u092B\u093E\u0907\u0932 \u0905\u092A\u0932\u094B\u0921 \u0915\u0947\u0932\u0940: ${result.filename}`,
+      "system",
+      performedBy
+    );
+    res.status(201).json(result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Upload processing failed: ${msg}` });
   }
-  const result = await saveBase64Image(payload, String(prefix));
-  if (!result.success) {
-    res.status(400).json(result);
-    return;
-  }
-  const performedBy = req.adminUser?.name || "Administrator";
-  serverContentDb.recordAudit(
-    `Uploaded media asset: ${result.filename} (${((result.size || 0) / 1024).toFixed(1)} KB)`,
-    `\u092E\u0940\u0921\u093F\u092F\u093E \u092B\u093E\u0907\u0932 \u0905\u092A\u0932\u094B\u0921 \u0915\u0947\u0932\u0940: ${result.filename}`,
-    "system",
-    performedBy
-  );
-  res.status(201).json(result);
 });
-contentRouter.delete("/upload", requireAdminAuth, requireCsrf, (req, res) => {
-  const { url } = req.body || {};
-  if (!url || typeof url !== "string") {
-    res.status(400).json({ success: false, errorEn: "Image URL is required" });
-    return;
-  }
-  const allContent = serverContentDb.getAllContent();
-  const referencedUrls = /* @__PURE__ */ new Set();
-  allContent.products?.forEach((p) => {
-    if (p.image) referencedUrls.add(p.image);
-    if (p.imageUrl) referencedUrls.add(p.imageUrl);
-  });
-  allContent.categories?.forEach((c) => {
-    if (c.image) referencedUrls.add(c.image);
-  });
-  allContent.brands?.forEach((b) => {
-    if (b.logo) referencedUrls.add(b.logo);
-  });
-  allContent.fieldVisits?.forEach((v) => {
-    if (v.imageSrc) referencedUrls.add(v.imageSrc);
-  });
-  allContent.results?.forEach((r) => {
-    if (r.image) referencedUrls.add(r.image);
-  });
-  allContent.fieldExperiences?.forEach((f) => {
-    if (f.image) referencedUrls.add(f.image);
-  });
-  if (allContent.ownerProfile?.image) referencedUrls.add(allContent.ownerProfile.image);
-  if (referencedUrls.has(url)) {
-    res.status(409).json({
-      success: false,
-      errorEn: "Cannot delete image: It is currently assigned to one or more active catalog items.",
-      errorMr: "\u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0939\u091F\u0935\u0924\u093E \u092F\u0947\u0924 \u0928\u093E\u0939\u0940: \u0924\u0940 \u0938\u0927\u094D\u092F\u093E \u0907\u0924\u0930 \u0918\u091F\u0915\u093E\u0902\u092E\u0927\u094D\u092F\u0947 \u0935\u093E\u092A\u0930\u093E\u0924 \u0906\u0939\u0947."
+contentRouter.delete("/upload", requireAdminAuth, requireCsrf, async (req, res) => {
+  try {
+    const { url } = req.body || {};
+    if (!url || typeof url !== "string") {
+      res.status(400).json({ success: false, errorEn: "Image URL is required" });
+      return;
+    }
+    const allContent = await serverContentDb.getAllContent();
+    const referencedUrls = /* @__PURE__ */ new Set();
+    allContent.products?.forEach((p) => {
+      if (p.image) referencedUrls.add(p.image);
+      if (p.imageUrl) referencedUrls.add(p.imageUrl);
     });
-    return;
+    allContent.categories?.forEach((c) => {
+      if (c.image) referencedUrls.add(c.image);
+    });
+    allContent.brands?.forEach((b) => {
+      if (b.logo) referencedUrls.add(b.logo);
+    });
+    allContent.fieldVisits?.forEach((v) => {
+      if (v.imageSrc) referencedUrls.add(v.imageSrc);
+    });
+    allContent.results?.forEach((r) => {
+      if (r.image) referencedUrls.add(r.image);
+    });
+    allContent.fieldExperiences?.forEach((f) => {
+      if (f.image) referencedUrls.add(f.image);
+    });
+    if (allContent.ownerProfile?.image) referencedUrls.add(allContent.ownerProfile.image);
+    if (referencedUrls.has(url)) {
+      res.status(409).json({
+        success: false,
+        errorEn: "Cannot delete image: It is currently assigned to one or more active catalog items.",
+        errorMr: "\u092A\u094D\u0930\u0924\u093F\u092E\u093E \u0939\u091F\u0935\u0924\u093E \u092F\u0947\u0924 \u0928\u093E\u0939\u0940: \u0924\u0940 \u0938\u0927\u094D\u092F\u093E \u0907\u0924\u0930 \u0918\u091F\u0915\u093E\u0902\u092E\u0927\u094D\u092F\u0947 \u0935\u093E\u092A\u0930\u093E\u0924 \u0906\u0939\u0947."
+      });
+      return;
+    }
+    const deleted = await deleteUploadFile(url);
+    if (!deleted) {
+      res.status(404).json({ success: false, errorEn: "File not found or cannot be deleted." });
+      return;
+    }
+    res.json({ success: true, messageEn: "Image file removed from server disk." });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(500).json({ success: false, errorEn: `Failed to delete file: ${msg}` });
   }
-  const deleted = deleteUploadFile(url);
-  if (!deleted) {
-    res.status(404).json({ success: false, errorEn: "File not found or cannot be deleted." });
-    return;
-  }
-  res.json({ success: true, messageEn: "Image file removed from server disk." });
 });
 
 // server/translationRoutes.ts

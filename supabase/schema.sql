@@ -221,6 +221,18 @@ CREATE INDEX IF NOT EXISTS idx_farmer_results_order ON public.farmer_results(dis
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON public.admin_audit_logs(timestamp DESC);
 
 -- ==============================================================================
+-- ROLE PERMISSIONS & GRANTS
+-- ==============================================================================
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL ROUTINES IN SCHEMA public TO anon, authenticated, service_role;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON ROUTINES TO anon, authenticated, service_role;
+
+-- ==============================================================================
 -- ROW-LEVEL SECURITY (RLS) POLICIES
 -- ==============================================================================
 -- Enable RLS on all tables
