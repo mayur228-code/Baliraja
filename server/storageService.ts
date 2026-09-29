@@ -4,9 +4,13 @@ import crypto from 'node:crypto';
 
 export const UPLOADS_DIR = path.resolve(process.cwd(), 'server/uploads');
 
-// Ensure upload directory exists on server initialization
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+// Ensure upload directory exists on server initialization (safe against read-only filesystems)
+try {
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
+} catch (err) {
+  console.warn('[STORAGE_SERVICE] Uploads directory is read-only or not writable:', err instanceof Error ? err.message : String(err));
 }
 
 export interface ImageValidationResult {

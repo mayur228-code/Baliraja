@@ -49,8 +49,12 @@ class ServerDatabase {
   }
 
   private ensureDirectory(): void {
-    if (!fs.existsSync(DB_DIR)) {
-      fs.mkdirSync(DB_DIR, { recursive: true });
+    try {
+      if (!fs.existsSync(DB_DIR)) {
+        fs.mkdirSync(DB_DIR, { recursive: true });
+      }
+    } catch (err) {
+      console.warn('[SERVER_DB] Database directory is read-only or not writable (operating in-memory mode):', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -71,11 +75,15 @@ class ServerDatabase {
         }
       }
     } catch (err) {
-      console.error('[SERVER_DB] Error loading database, initializing fresh:', err);
+      console.warn('[SERVER_DB] Error loading database file, initializing in-memory fresh:', err instanceof Error ? err.message : String(err));
     }
 
     const initial = initDefaultDb();
-    this.saveDatabaseSync(initial);
+    try {
+      this.saveDatabaseSync(initial);
+    } catch (err) {
+      console.warn('[SERVER_DB] Could not persist initial database (read-only filesystem):', err instanceof Error ? err.message : String(err));
+    }
     this.db = initial;
     return initial;
   }
@@ -83,11 +91,11 @@ class ServerDatabase {
   private saveDatabaseSync(data: ServerAuthDatabase): void {
     try {
       this.ensureDirectory();
-      const tmpFile = `${DB_FILE}.tmp`;
+      const tmpFile = `${DB_FILE}.tmp_${Date.now()}`;
       fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
       fs.renameSync(tmpFile, DB_FILE);
     } catch (err) {
-      console.error('[SERVER_DB] Failed to save database file:', err);
+      console.warn('[SERVER_DB] Could not persist database file (in-memory state active):', err instanceof Error ? err.message : String(err));
     }
   }
 

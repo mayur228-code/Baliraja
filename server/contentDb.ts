@@ -78,8 +78,12 @@ class ServerContentDatabase {
   }
 
   private ensureDirectory(): void {
-    if (!fs.existsSync(CONTENT_DIR)) {
-      fs.mkdirSync(CONTENT_DIR, { recursive: true });
+    try {
+      if (!fs.existsSync(CONTENT_DIR)) {
+        fs.mkdirSync(CONTENT_DIR, { recursive: true });
+      }
+    } catch (err) {
+      console.warn('[SERVER_CONTENT_DB] Content directory is read-only or not writable (operating in-memory mode):', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -106,11 +110,15 @@ class ServerContentDatabase {
         }
       }
     } catch (err) {
-      console.error('[SERVER_CONTENT_DB] Error loading content database, initializing defaults:', err);
+      console.warn('[SERVER_CONTENT_DB] Error loading content database file, initializing defaults:', err instanceof Error ? err.message : String(err));
     }
 
     const initial = initDefaultContent();
-    this.saveDatabaseSync(initial);
+    try {
+      this.saveDatabaseSync(initial);
+    } catch (err) {
+      console.warn('[SERVER_CONTENT_DB] Could not persist initial content (read-only filesystem):', err instanceof Error ? err.message : String(err));
+    }
     this.data = initial;
     return initial;
   }
@@ -118,11 +126,11 @@ class ServerContentDatabase {
   private saveDatabaseSync(data: ServerContentData): void {
     try {
       this.ensureDirectory();
-      const tmpFile = `${CONTENT_FILE}.tmp`;
+      const tmpFile = `${CONTENT_FILE}.tmp_${Date.now()}`;
       fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf-8');
       fs.renameSync(tmpFile, CONTENT_FILE);
     } catch (err) {
-      console.error('[SERVER_CONTENT_DB] Failed to save content database file:', err);
+      console.warn('[SERVER_CONTENT_DB] Could not save content database file (in-memory state active):', err instanceof Error ? err.message : String(err));
     }
   }
 

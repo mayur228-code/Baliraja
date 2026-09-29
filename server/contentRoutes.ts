@@ -120,9 +120,26 @@ function sanitizeString(val: unknown, maxLen = 5000): string {
 // ════════════════════════════════════════════════════════════════════════════════
 // 1. FULL CONTENT BUNDLE (Public Read, Protected Reset/Import/Export)
 // ════════════════════════════════════════════════════════════════════════════════
-contentRouter.get('/', (_req: Request, res: Response) => {
-  const data = serverContentDb.getAllContent();
-  res.json({ success: true, data });
+contentRouter.get('/', (req: Request, res: Response) => {
+  const startTime = Date.now();
+  try {
+    const data = serverContentDb.getAllContent();
+    const durationMs = Date.now() - startTime;
+    console.log(`[DIAGNOSTIC_CONTENT_GET] Path: ${req.originalUrl || req.url} | Status: 200 | Products: ${data?.products?.length ?? 0} | Categories: ${data?.categories?.length ?? 0} | Duration: ${durationMs}ms`);
+    res.json({ success: true, data });
+  } catch (err: unknown) {
+    const durationMs = Date.now() - startTime;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const errStack = err instanceof Error ? err.stack : undefined;
+    console.error(`[DIAGNOSTIC_CONTENT_GET_ERROR] Path: ${req.originalUrl || req.url} | Status: 500 | Duration: ${durationMs}ms | Error: ${errMsg}`);
+    if (errStack) console.error(`[DIAGNOSTIC_CONTENT_GET_STACK]`, errStack);
+
+    res.status(500).json({
+      success: false,
+      errorEn: 'Internal server error while retrieving catalog content.',
+      errorMr: 'कॅटलॉग सामग्री मिळवताना सर्व्हर त्रुटी आली.'
+    });
+  }
 });
 
 contentRouter.post('/reset', requireAdminAuth, requireCsrf, (req: AuthenticatedRequest, res: Response) => {

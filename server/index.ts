@@ -121,18 +121,18 @@ app.use(cors({
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ limit: '25mb', extended: true }));
 
-// Mount API routes
-app.use('/api/auth', authRouter);
-app.use('/api/content', contentRouter);
-app.use('/api/translate', translationRouter);
+// Mount API routes (supports both /api/* and /* for full Vercel serverless / Express runtime compatibility)
+app.use(['/api/auth', '/auth'], authRouter);
+app.use(['/api/content', '/content'], contentRouter);
+app.use(['/api/translate', '/translate'], translationRouter);
 
 // Health check
-app.get('/api/health', (_req, res) => {
+app.get(['/api/health', '/health'], (_req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
 // Dedicated Secure Read-Only Image Serving Route with Path Traversal Protection
-app.get('/uploads/:filename', (req, res) => {
+app.get(['/uploads/:filename', '/api/uploads/:filename'], (req, res) => {
   const rawParam = req.params.filename;
   const filename = path.basename(Array.isArray(rawParam) ? rawParam[0] : (rawParam || ''));
   const filePath = path.join(UPLOADS_DIR, filename);
@@ -150,6 +150,22 @@ app.get('/uploads/:filename', (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
   res.sendFile(filePath);
+});
+
+// Global Express Error Handler (Catches any unhandled router errors safely)
+app.use((err: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  console.error(`[SERVER_GLOBAL_ERROR] Method: ${req.method} | URL: ${req.originalUrl || req.url} | Error: ${errMsg}`);
+  if (err instanceof Error && err.stack) {
+    console.error(`[SERVER_GLOBAL_ERROR_STACK]`, err.stack);
+  }
+  if (!res.headersSent) {
+    res.status(500).json({
+      success: false,
+      errorEn: 'An unexpected internal server error occurred.',
+      errorMr: 'सर्व्हरवर अनपेक्षित त्रुटी आली.'
+    });
+  }
 });
 
 const isDirectExecution = process.argv[1]?.replace(/\\/g, '/').endsWith('server/index.ts') || process.env.RUN_SERVER === 'true';
