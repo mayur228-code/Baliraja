@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import type { ServerAuthDatabase, ServerAdminUser, ServerResetToken, ServerSession } from './types.ts';
+import type { ServerAuthDatabase, ServerAdminUser, ServerResetToken, ServerSession } from './types';
 
 const DB_DIR = path.resolve(process.cwd(), 'server/data');
 const DB_FILE = path.join(DB_DIR, 'admin_auth.json');

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { saveBase64Image, verifyImageFile, UPLOADS_DIR } from './storageService.ts';
-import type { ServerContentData } from './contentDb.ts';
+import { saveBase64Image, verifyImageFile, UPLOADS_DIR } from './storageService';
+import type { ServerContentData } from './contentDb';
 
 const CONTENT_FILE = path.resolve(process.cwd(), 'server/data/content.json');
 

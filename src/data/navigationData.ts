@@ -1,4 +1,4 @@
-import type { NavCategory } from '../types/index.ts';
+import type { NavCategory } from '../types/index';
 
 export const defaultCategories: NavCategory[] = [
   {

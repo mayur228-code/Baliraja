@@ -1,4 +1,4 @@
-import type { FieldVisitItem } from '../types/index.ts';
+import type { FieldVisitItem } from '../types/index';
 
 export type { FieldVisitItem };
 

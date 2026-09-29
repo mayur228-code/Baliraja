@@ -1,10 +1,10 @@
 import type { Request, Response, NextFunction } from 'express';
 import { Router } from 'express';
 import crypto from 'node:crypto';
-import { serverContentDb } from './contentDb.ts';
-import { serverDb } from './db.ts';
-import { getSessionToken, parseCookies, CSRF_COOKIE_NAME } from './routes.ts';
-import { saveBase64Image, deleteUploadFile } from './storageService.ts';
+import { serverContentDb } from './contentDb';
+import { serverDb } from './db';
+import { getSessionToken, parseCookies, CSRF_COOKIE_NAME } from './routes';
+import { saveBase64Image, deleteUploadFile } from './storageService';
 
 export const contentRouter = Router();
 

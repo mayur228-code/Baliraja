@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { serverDb } from './db.ts';
-import { sendPasswordResetEmail, isEmailProviderConfigured } from './email.ts';
+import { serverDb } from './db';
+import { sendPasswordResetEmail, isEmailProviderConfigured } from './email';
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 Hours
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 Minutes

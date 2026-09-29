@@ -1,4 +1,4 @@
-import type { FarmerResult } from '../types/index.ts';
+import type { FarmerResult } from '../types/index';
 
 /**
  * Initial Seed Data for Baliraja Farmer Results

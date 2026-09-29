@@ -1,4 +1,4 @@
-import type { Product } from '../types/index.ts';
+import type { Product } from '../types/index';
 
 /**
  * BALIRAJA KRISHI SEVA KENDRA — Product Catalog Data Foundation

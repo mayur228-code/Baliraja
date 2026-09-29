@@ -4,11 +4,11 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
-import { authRouter } from './routes.ts';
-import { contentRouter } from './contentRoutes.ts';
-import { translationRouter } from './translationRoutes.ts';
-import { serverAuthService } from './authService.ts';
-import { UPLOADS_DIR } from './storageService.ts';
+import { authRouter } from './routes';
+import { contentRouter } from './contentRoutes';
+import { translationRouter } from './translationRoutes';
+import { serverAuthService } from './authService';
+import { UPLOADS_DIR } from './storageService';
 
 dotenv.config();
 

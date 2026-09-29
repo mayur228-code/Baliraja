@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import { Router } from 'express';
-import { serverTranslationService, type LanguageCode } from './translationService.ts';
-import { getClientIp } from './routes.ts';
+import { serverTranslationService, type LanguageCode } from './translationService';
+import { getClientIp } from './routes';
 
 export const translationRouter = Router();
 

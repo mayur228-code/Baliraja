@@ -1,4 +1,4 @@
-import { authService } from '../auth/authService.ts';
+import { authService } from '../auth/authService';
 
 export interface UploadResponse {
   success: boolean;

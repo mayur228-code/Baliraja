@@ -1,4 +1,4 @@
-import type { OwnerProfile, VerifiedBusinessInfo, BusinessStoryPrinciple } from '../types/index.ts';
+import type { OwnerProfile, VerifiedBusinessInfo, BusinessStoryPrinciple } from '../types/index';
 
 /**
  * Verified Single Source of Truth for Owner & Business Information.

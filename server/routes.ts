@@ -1,8 +1,8 @@
 import type { Request, Response } from 'express';
 import { Router, json } from 'express';
 import crypto from 'node:crypto';
-import { serverAuthService } from './authService.ts';
-import { serverDb } from './db.ts';
+import { serverAuthService } from './authService';
+import { serverDb } from './db';
 
 export const authRouter = Router();
 

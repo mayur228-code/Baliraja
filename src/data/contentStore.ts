@@ -8,20 +8,20 @@ import type {
   FarmerResult, 
   VerifiedBusinessInfo, 
   OwnerProfile 
-} from '../types/index.ts';
-import { sampleProducts } from './productData.ts';
-import { defaultCategories } from './navigationData.ts';
-import { fieldVisitItems as defaultFieldVisits } from './fieldVisitsData.ts';
-import { fieldExperiences as defaultFieldExperiences } from './fieldExperienceData.ts';
-import { defaultFarmerResults } from './resultsData.ts';
-import { verifiedBusinessInfo as defaultBusinessInfo, ownerProfile as defaultOwnerProfile } from './aboutData.ts';
+} from '../types/index';
+import { sampleProducts } from './productData';
+import { defaultCategories } from './navigationData';
+import { fieldVisitItems as defaultFieldVisits } from './fieldVisitsData';
+import { fieldExperiences as defaultFieldExperiences } from './fieldExperienceData';
+import { defaultFarmerResults } from './resultsData';
+import { verifiedBusinessInfo as defaultBusinessInfo, ownerProfile as defaultOwnerProfile } from './aboutData';
 import { 
   getStoredContentFromDb, 
   saveStoredContentToDb, 
   broadcastContentChange, 
   subscribeToContentSync 
-} from '../lib/storageDb.ts';
-import { authService } from '../admin/auth/authService.ts';
+} from '../lib/storageDb';
+import { authService } from '../admin/auth/authService';
 
 /**
  * BALIRAJA KRISHI SEVA KENDRA — Central Content Store & Server Data Adapter (Phase 2B)

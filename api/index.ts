@@ -1,4 +1,4 @@
-import app from '../server/index.ts';
+import app from '../server/index';
 
 /**
  * Vercel Serverless Function entrypoint for Baliraja API.

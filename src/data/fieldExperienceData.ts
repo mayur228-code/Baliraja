@@ -1,4 +1,4 @@
-import type { FieldExperience } from '../types/index.ts';
+import type { FieldExperience } from '../types/index';
 
 /**
  * BALIRAJA KRISHI SEVA KENDRA — Field Experience & Agricultural Observations
