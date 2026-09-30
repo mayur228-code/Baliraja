@@ -3,7 +3,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { serverContentDb } from './contentDb';
 import { serverDb } from './db';
-import { getSessionToken, parseCookies, CSRF_COOKIE_NAME } from './routes';
+import { getSessionToken } from './routes';
 import { saveBase64Image, deleteUploadFile } from './storageService';
 
 export const contentRouter = Router();
@@ -85,20 +85,18 @@ export function requireCsrf(req: AuthenticatedRequest, res: Response, next: Next
   }
 
   const headerCsrf = ((req.headers['x-csrf-token'] as string) || (req.headers['x-xsrf-token'] as string) || '').trim();
-  const cookieCsrf = (parseCookies(req.headers['cookie'])[CSRF_COOKIE_NAME] || '').trim();
-  const tokenToVerify = headerCsrf || cookieCsrf;
 
-  if (!session.csrfToken || !tokenToVerify) {
+  if (!session.csrfToken || !headerCsrf) {
     res.status(403).json({
       success: false,
-      errorEn: 'Security check failed: CSRF token missing.',
+      errorEn: 'Security check failed: CSRF token missing in request header.',
       errorMr: 'सुरक्षा पडताळणी अयशस्वी: CSRF टोकन गहाळ आहे.'
     });
     return;
   }
 
   const a = Buffer.from(session.csrfToken);
-  const b = Buffer.from(tokenToVerify);
+  const b = Buffer.from(headerCsrf);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     res.status(403).json({
       success: false,

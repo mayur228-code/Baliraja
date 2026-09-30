@@ -33,3 +33,7 @@ server/data/*.json
 *.njsproj
 *.sln
 *.sw?
+
+# Scratch & temporary testing
+scratch/
+

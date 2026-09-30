@@ -42,10 +42,11 @@ function getCsrfCookieOptions() {
 }
 
 // Parse Cookie header into key-value map
-export function parseCookies(header?: string): Record<string, string> {
+export function parseCookies(header?: string | string[]): Record<string, string> {
   if (!header) return {};
+  const headerStr = Array.isArray(header) ? header.join('; ') : header;
   const cookies: Record<string, string> = {};
-  const pairs = header.split(';');
+  const pairs = headerStr.split(';');
   for (let i = 0; i < pairs.length; i++) {
     const pair = pairs[i].trim();
     if (!pair) continue;
@@ -73,19 +74,27 @@ export function getClientIp(req: Request): string {
 
 // Helper to extract session token from HttpOnly cookie or Authorization header fallback
 export function getSessionToken(req: Request): string {
-  // 1. Primary: HttpOnly Cookie
-  const cookies = parseCookies(req.headers['cookie']);
+  // 1. Express req.cookies if populated
+  if ((req as any).cookies && (req as any).cookies[SESSION_COOKIE_NAME]) {
+    return String((req as any).cookies[SESSION_COOKIE_NAME]).trim();
+  }
+
+  // 2. Primary: HttpOnly Cookie header
+  const rawCookieHeader = req.headers['cookie'] || req.headers['Cookie'];
+  const cookies = parseCookies(rawCookieHeader);
   if (cookies[SESSION_COOKIE_NAME]) {
     return cookies[SESSION_COOKIE_NAME].trim();
   }
 
-  // 2. Fallback: Authorization header (for backward compatibility / API testing)
-  const authHeader = req.headers['authorization'];
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.slice(7).trim();
+  // 3. Fallback: Authorization header (for backward compatibility / API testing)
+  const authHeader = req.headers['authorization'] || req.headers['Authorization'];
+  const authStr = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (authStr && typeof authStr === 'string' && authStr.startsWith('Bearer ')) {
+    return authStr.slice(7).trim();
   }
 
-  return (req.headers['x-session-token'] as string) || '';
+  const customToken = req.headers['x-session-token'];
+  return (Array.isArray(customToken) ? customToken[0] : (customToken as string)) || '';
 }
 
 // Verify Anti-CSRF token for state-changing authenticated requests
@@ -102,13 +111,11 @@ function verifyCsrfToken(req: Request, res: Response, sessionToken: string): boo
   }
 
   const headerCsrf = ((req.headers['x-csrf-token'] as string) || (req.headers['x-xsrf-token'] as string) || '').trim();
-  const cookieCsrf = (parseCookies(req.headers['cookie'])[CSRF_COOKIE_NAME] || '').trim();
-  const tokenToVerify = headerCsrf || cookieCsrf;
 
-  if (!session.csrfToken || !tokenToVerify) {
+  if (!session.csrfToken || !headerCsrf) {
     res.status(403).json({
       success: false,
-      errorEn: 'Security validation failed: CSRF token is missing. Please refresh and try again.',
+      errorEn: 'Security validation failed: CSRF token is missing in x-csrf-token header. Please refresh and try again.',
       errorMr: 'सुरक्षा पडताळणी अयशस्वी: CSRF टोकन गहाळ आहे. कृपया पेज रीफ्रेश करा.'
     });
     return false;
@@ -116,7 +123,7 @@ function verifyCsrfToken(req: Request, res: Response, sessionToken: string): boo
 
   // Timing-safe comparison to prevent side-channel timing attacks
   const a = Buffer.from(session.csrfToken);
-  const b = Buffer.from(tokenToVerify);
+  const b = Buffer.from(headerCsrf);
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     res.status(403).json({
       success: false,

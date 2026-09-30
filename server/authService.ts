@@ -76,10 +76,10 @@ export class ServerAuthService {
     // Update last login timestamp
     serverDb.updateLastLogin();
 
-    // Generate secure session token and cryptographically random CSRF token
-    const sessionToken = `baliraja_adm_${crypto.randomBytes(32).toString('hex')}`;
+    // Generate secure anti-CSRF token and cryptographically signed session token
     const csrfToken = crypto.randomBytes(32).toString('hex');
-    serverDb.createSession(sessionToken, admin.id, SESSION_TTL_MS, csrfToken);
+    const session = serverDb.createSession('', admin.id, SESSION_TTL_MS, csrfToken);
+    const sessionToken = session.sessionToken;
 
     return {
       success: true,

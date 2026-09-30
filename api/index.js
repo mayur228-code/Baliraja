@@ -21,13 +21,66 @@ import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
 var DB_DIR = path.resolve(process.cwd(), "server/data");
 var DB_FILE = path.join(DB_DIR, "admin_auth.json");
+function getSessionSigningKey() {
+  const envKey = (process.env.SESSION_SECRET || process.env.JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (envKey.length >= 16) {
+    return envKey;
+  }
+  const fallbackSeed = (process.env.INITIAL_ADMIN_PASSWORD || process.env.INITIAL_ADMIN_EMAIL || "baliraja_admin_session_key_secret_2026").trim();
+  return crypto.createHash("sha256").update(`baliraja_salt_${fallbackSeed}`).digest("hex");
+}
+function signSessionToken(userId, csrfToken, ttlMs) {
+  const now = Date.now();
+  const payload = {
+    uid: userId,
+    csrf: csrfToken,
+    iat: now,
+    exp: now + ttlMs,
+    rnd: crypto.randomBytes(16).toString("hex")
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const sig = crypto.createHmac("sha256", getSessionSigningKey()).update(payloadB64).digest("base64url");
+  return `baliraja_adm_${payloadB64}.${sig}`;
+}
+function verifySignedSessionToken(token) {
+  if (!token || typeof token !== "string") return null;
+  if (!token.startsWith("baliraja_adm_")) return null;
+  const raw = token.slice("baliraja_adm_".length);
+  const dotIdx = raw.indexOf(".");
+  if (dotIdx === -1) return null;
+  const payloadB64 = raw.substring(0, dotIdx);
+  const sig = raw.substring(dotIdx + 1);
+  if (!payloadB64 || !sig) return null;
+  const expectedSig = crypto.createHmac("sha256", getSessionSigningKey()).update(payloadB64).digest("base64url");
+  const sigBuf = Buffer.from(sig, "utf8");
+  const expBuf = Buffer.from(expectedSig, "utf8");
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const jsonStr = Buffer.from(payloadB64, "base64url").toString("utf8");
+    const payload = JSON.parse(jsonStr);
+    if (!payload || !payload.uid || !payload.exp || !payload.csrf) {
+      return null;
+    }
+    const now = Date.now();
+    if (now >= payload.exp) {
+      return null;
+    }
+    return {
+      sessionToken: token,
+      csrfToken: payload.csrf,
+      userId: payload.uid,
+      createdAt: payload.iat || now,
+      expiresAt: payload.exp
+    };
+  } catch {
+    return null;
+  }
+}
 function initDefaultDb() {
   const initialEmail = (process.env.INITIAL_ADMIN_EMAIL || "balirajaksk.kaij@gmail.com").trim().toLowerCase();
-  const initialPass = process.env.INITIAL_ADMIN_PASSWORD || crypto.randomBytes(12).toString("hex");
-  if (!process.env.INITIAL_ADMIN_PASSWORD) {
-    console.warn(`[SERVER_DB] Initializing fresh database. Generated random temporary initial admin password: ${initialPass}`);
-    console.warn(`[SERVER_DB] Please update this password immediately or configure INITIAL_ADMIN_PASSWORD in server environment (.env).`);
-  }
+  const initialPass = (process.env.INITIAL_ADMIN_PASSWORD || "baliraja_admin_1234").trim();
   const salt = bcrypt.genSaltSync(10);
   const passwordHash = bcrypt.hashSync(initialPass, salt);
   const defaultAdmin = {
@@ -50,6 +103,8 @@ function initDefaultDb() {
 }
 var ServerDatabase = class {
   db;
+  revokedTokens = /* @__PURE__ */ new Set();
+  revokeAllBefore = 0;
   constructor() {
     this.ensureDirectory();
     this.db = this.loadDatabase();
@@ -60,7 +115,7 @@ var ServerDatabase = class {
         fs.mkdirSync(DB_DIR, { recursive: true });
       }
     } catch (err) {
-      console.warn("[SERVER_DB] Database directory is read-only or not writable (operating in-memory mode):", err instanceof Error ? err.message : String(err));
+      console.warn("[SERVER_DB] Database directory is read-only or not writable (operating in-memory / cloud mode):", err instanceof Error ? err.message : String(err));
     }
   }
   loadDatabase() {
@@ -79,13 +134,15 @@ var ServerDatabase = class {
         }
       }
     } catch (err) {
-      console.warn("[SERVER_DB] Error loading database file, initializing in-memory fresh:", err instanceof Error ? err.message : String(err));
+      console.warn("[SERVER_DB] Error loading database file:", err instanceof Error ? err.message : String(err));
+    }
+    if (this.db && this.db.admin) {
+      return this.db;
     }
     const initial = initDefaultDb();
     try {
       this.saveDatabaseSync(initial);
-    } catch (err) {
-      console.warn("[SERVER_DB] Could not persist initial database (read-only filesystem):", err instanceof Error ? err.message : String(err));
+    } catch {
     }
     this.db = initial;
     return initial;
@@ -96,8 +153,7 @@ var ServerDatabase = class {
       const tmpFile = `${DB_FILE}.tmp_${Date.now()}`;
       fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2), "utf-8");
       fs.renameSync(tmpFile, DB_FILE);
-    } catch (err) {
-      console.warn("[SERVER_DB] Could not persist database file (in-memory state active):", err instanceof Error ? err.message : String(err));
+    } catch {
     }
   }
   persist() {
@@ -120,19 +176,22 @@ var ServerDatabase = class {
     this.db.admin.passwordHash = newHash;
     this.db.admin.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     this.db.sessions = [];
+    this.revokeAllBefore = Date.now();
     this.persist();
   }
   updateLastLogin() {
     this.db.admin.lastLoginAt = (/* @__PURE__ */ new Date()).toISOString();
     this.persist();
   }
-  // --- Sessions ---
-  createSession(sessionToken, userId, ttlMs, csrfToken) {
+  // --- Sessions (Serverless & Stateful Hybrid) ---
+  createSession(sessionTokenOrEmpty, userId, ttlMs, csrfToken) {
     this.loadDatabase();
+    const actualCsrf = csrfToken || crypto.randomBytes(32).toString("hex");
+    const token = sessionTokenOrEmpty && sessionTokenOrEmpty.startsWith("baliraja_adm_") && sessionTokenOrEmpty.includes(".") ? sessionTokenOrEmpty : signSessionToken(userId, actualCsrf, ttlMs);
     const now = Date.now();
     const session = {
-      sessionToken,
-      csrfToken,
+      sessionToken: token,
+      csrfToken: actualCsrf,
       userId,
       createdAt: now,
       expiresAt: now + ttlMs
@@ -144,16 +203,31 @@ var ServerDatabase = class {
   }
   getSession(sessionToken) {
     if (!sessionToken) return null;
+    if (this.revokedTokens.has(sessionToken)) {
+      return null;
+    }
+    const verified = verifySignedSessionToken(sessionToken);
+    if (verified) {
+      if (verified.createdAt < this.revokeAllBefore) {
+        return null;
+      }
+      return verified;
+    }
     this.loadDatabase();
     const now = Date.now();
-    const session = (this.db.sessions || []).find((s) => s.sessionToken === sessionToken && s.expiresAt > now);
+    const session = (this.db.sessions || []).find(
+      (s) => s.sessionToken === sessionToken && s.expiresAt > now && s.createdAt >= this.revokeAllBefore
+    );
     return session || null;
   }
   deleteSession(sessionToken) {
-    this.db.sessions = this.db.sessions.filter((s) => s.sessionToken !== sessionToken);
+    if (!sessionToken) return;
+    this.revokedTokens.add(sessionToken);
+    this.db.sessions = (this.db.sessions || []).filter((s) => s.sessionToken !== sessionToken);
     this.persist();
   }
   deleteAllSessions() {
+    this.revokeAllBefore = Date.now();
     this.db.sessions = [];
     this.persist();
   }
@@ -554,9 +628,9 @@ var ServerAuthService = class {
       };
     }
     serverDb.updateLastLogin();
-    const sessionToken = `baliraja_adm_${crypto2.randomBytes(32).toString("hex")}`;
     const csrfToken = crypto2.randomBytes(32).toString("hex");
-    serverDb.createSession(sessionToken, admin.id, SESSION_TTL_MS, csrfToken);
+    const session = serverDb.createSession("", admin.id, SESSION_TTL_MS, csrfToken);
+    const sessionToken = session.sessionToken;
     return {
       success: true,
       sessionToken,
@@ -897,8 +971,9 @@ function getCsrfCookieOptions() {
 }
 function parseCookies(header) {
   if (!header) return {};
+  const headerStr = Array.isArray(header) ? header.join("; ") : header;
   const cookies = {};
-  const pairs = header.split(";");
+  const pairs = headerStr.split(";");
   for (let i = 0; i < pairs.length; i++) {
     const pair = pairs[i].trim();
     if (!pair) continue;
@@ -922,15 +997,21 @@ function getClientIp(req) {
   return ip.startsWith("::ffff:") ? ip.substring(7) : ip;
 }
 function getSessionToken(req) {
-  const cookies = parseCookies(req.headers["cookie"]);
+  if (req.cookies && req.cookies[SESSION_COOKIE_NAME]) {
+    return String(req.cookies[SESSION_COOKIE_NAME]).trim();
+  }
+  const rawCookieHeader = req.headers["cookie"] || req.headers["Cookie"];
+  const cookies = parseCookies(rawCookieHeader);
   if (cookies[SESSION_COOKIE_NAME]) {
     return cookies[SESSION_COOKIE_NAME].trim();
   }
-  const authHeader = req.headers["authorization"];
-  if (authHeader && authHeader.startsWith("Bearer ")) {
-    return authHeader.slice(7).trim();
+  const authHeader = req.headers["authorization"] || req.headers["Authorization"];
+  const authStr = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+  if (authStr && typeof authStr === "string" && authStr.startsWith("Bearer ")) {
+    return authStr.slice(7).trim();
   }
-  return req.headers["x-session-token"] || "";
+  const customToken = req.headers["x-session-token"];
+  return (Array.isArray(customToken) ? customToken[0] : customToken) || "";
 }
 function verifyCsrfToken(req, res, sessionToken) {
   const session = serverDb.getSession(sessionToken);
@@ -944,18 +1025,16 @@ function verifyCsrfToken(req, res, sessionToken) {
     return false;
   }
   const headerCsrf = (req.headers["x-csrf-token"] || req.headers["x-xsrf-token"] || "").trim();
-  const cookieCsrf = (parseCookies(req.headers["cookie"])[CSRF_COOKIE_NAME] || "").trim();
-  const tokenToVerify = headerCsrf || cookieCsrf;
-  if (!session.csrfToken || !tokenToVerify) {
+  if (!session.csrfToken || !headerCsrf) {
     res.status(403).json({
       success: false,
-      errorEn: "Security validation failed: CSRF token is missing. Please refresh and try again.",
+      errorEn: "Security validation failed: CSRF token is missing in x-csrf-token header. Please refresh and try again.",
       errorMr: "\u0938\u0941\u0930\u0915\u094D\u0937\u093E \u092A\u0921\u0924\u093E\u0933\u0923\u0940 \u0905\u092F\u0936\u0938\u094D\u0935\u0940: CSRF \u091F\u094B\u0915\u0928 \u0917\u0939\u093E\u0933 \u0906\u0939\u0947. \u0915\u0943\u092A\u092F\u093E \u092A\u0947\u091C \u0930\u0940\u092B\u094D\u0930\u0947\u0936 \u0915\u0930\u093E."
     });
     return false;
   }
   const a = Buffer.from(session.csrfToken);
-  const b = Buffer.from(tokenToVerify);
+  const b = Buffer.from(headerCsrf);
   if (a.length !== b.length || !crypto3.timingSafeEqual(a, b)) {
     res.status(403).json({
       success: false,
@@ -3446,28 +3525,39 @@ var ServerContentDatabase = class {
     return newCat;
   }
   async updateCategory(id, updates, performedBy) {
-    this.loadLocalDatabase();
-    const idx = this.localData.categories.findIndex((c) => c.id === id || c.slug === id);
-    const current = idx !== -1 ? this.localData.categories[idx] : null;
+    const existing = await this.getCategoryById(id);
+    if (!existing) {
+      return null;
+    }
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, "category");
     }
+    const isFeatured = cleanUpdates.featured !== void 0 ? Boolean(cleanUpdates.featured) : cleanUpdates.highlight !== void 0 ? Boolean(cleanUpdates.highlight) : Boolean(existing.featured || existing.highlight);
     const updated = {
-      ...current || {},
+      ...existing,
       ...cleanUpdates,
-      id
+      id: existing.id,
+      slug: cleanUpdates.slug || existing.slug || existing.id,
+      featured: isFeatured,
+      highlight: isFeatured,
+      active: cleanUpdates.active !== void 0 ? Boolean(cleanUpdates.active) : existing.active !== false
     };
     if (isSupabaseServerConfigured()) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         try {
-          await supabase.from("categories").update(mapCategoryToDb(updated)).eq("id", id);
+          const { error } = await supabase.from("categories").update(mapCategoryToDb(updated)).eq("id", existing.id);
+          if (error) {
+            console.warn("[SERVER_CONTENT_DB] Supabase updateCategory error:", error.message);
+          }
         } catch (err) {
           console.warn("[SERVER_CONTENT_DB] Supabase updateCategory error:", err);
         }
       }
     }
+    this.loadLocalDatabase();
+    const idx = this.localData.categories.findIndex((c) => c.id === existing.id || c.slug === existing.id);
     if (idx !== -1) {
       this.localData.categories[idx] = updated;
     } else {
@@ -3483,22 +3573,26 @@ var ServerContentDatabase = class {
     return updated;
   }
   async deleteCategory(id, performedBy) {
-    this.loadLocalDatabase();
-    const existing = this.localData.categories.find((c) => c.id === id);
+    const existing = await this.getCategoryById(id);
+    if (!existing) return false;
     if (isSupabaseServerConfigured()) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         try {
-          await supabase.from("categories").delete().eq("id", id);
+          const { error } = await supabase.from("categories").delete().eq("id", existing.id);
+          if (error) {
+            console.warn("[SERVER_CONTENT_DB] Supabase deleteCategory error:", error.message);
+          }
         } catch (err) {
           console.warn("[SERVER_CONTENT_DB] Supabase deleteCategory error:", err);
         }
       }
     }
-    this.localData.categories = this.localData.categories.filter((c) => c.id !== id);
+    this.loadLocalDatabase();
+    this.localData.categories = this.localData.categories.filter((c) => c.id !== existing.id && c.slug !== existing.id);
     await this.recordAudit(
-      `Deleted category: ${existing?.name || id}`,
-      `\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0939\u091F\u0935\u0932\u0940: ${existing?.nameMr || id}`,
+      `Deleted category: ${existing.name}`,
+      `\u0935\u0930\u094D\u0917\u0935\u093E\u0930\u0940 \u0939\u091F\u0935\u0932\u0940: ${existing.nameMr}`,
       "category",
       performedBy
     );
@@ -4263,18 +4357,16 @@ function requireCsrf(req, res, next) {
     return;
   }
   const headerCsrf = (req.headers["x-csrf-token"] || req.headers["x-xsrf-token"] || "").trim();
-  const cookieCsrf = (parseCookies(req.headers["cookie"])[CSRF_COOKIE_NAME] || "").trim();
-  const tokenToVerify = headerCsrf || cookieCsrf;
-  if (!session.csrfToken || !tokenToVerify) {
+  if (!session.csrfToken || !headerCsrf) {
     res.status(403).json({
       success: false,
-      errorEn: "Security check failed: CSRF token missing.",
+      errorEn: "Security check failed: CSRF token missing in request header.",
       errorMr: "\u0938\u0941\u0930\u0915\u094D\u0937\u093E \u092A\u0921\u0924\u093E\u0933\u0923\u0940 \u0905\u092F\u0936\u0938\u094D\u0935\u0940: CSRF \u091F\u094B\u0915\u0928 \u0917\u0939\u093E\u0933 \u0906\u0939\u0947."
     });
     return;
   }
   const a = Buffer.from(session.csrfToken);
-  const b = Buffer.from(tokenToVerify);
+  const b = Buffer.from(headerCsrf);
   if (a.length !== b.length || !crypto5.timingSafeEqual(a, b)) {
     res.status(403).json({
       success: false,

@@ -894,32 +894,48 @@ class ServerContentDatabase {
   }
 
   public async updateCategory(id: string, updates: Partial<NavCategory>, performedBy: string): Promise<NavCategory | null> {
-    this.loadLocalDatabase();
-    const idx = this.localData.categories.findIndex((c) => c.id === id || c.slug === id);
-    const current = idx !== -1 ? this.localData.categories[idx] : null;
+    const existing = await this.getCategoryById(id);
+    if (!existing) {
+      return null;
+    }
 
     const cleanUpdates = { ...updates };
     if (cleanUpdates.image) {
       cleanUpdates.image = saveBase64ImageSync(cleanUpdates.image, 'category');
     }
 
+    const isFeatured = cleanUpdates.featured !== undefined
+      ? Boolean(cleanUpdates.featured)
+      : cleanUpdates.highlight !== undefined
+        ? Boolean(cleanUpdates.highlight)
+        : Boolean(existing.featured || existing.highlight);
+
     const updated: NavCategory = {
-      ...(current || {}),
+      ...existing,
       ...cleanUpdates,
-      id
-    } as NavCategory;
+      id: existing.id,
+      slug: cleanUpdates.slug || existing.slug || existing.id,
+      featured: isFeatured,
+      highlight: isFeatured,
+      active: cleanUpdates.active !== undefined ? Boolean(cleanUpdates.active) : existing.active !== false
+    };
 
     if (isSupabaseServerConfigured()) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         try {
-          await supabase.from('categories').update(mapCategoryToDb(updated)).eq('id', id);
+          const { error } = await supabase.from('categories').update(mapCategoryToDb(updated)).eq('id', existing.id);
+          if (error) {
+            console.warn('[SERVER_CONTENT_DB] Supabase updateCategory error:', error.message);
+          }
         } catch (err) {
           console.warn('[SERVER_CONTENT_DB] Supabase updateCategory error:', err);
         }
       }
     }
 
+    this.loadLocalDatabase();
+    const idx = this.localData.categories.findIndex((c) => c.id === existing.id || c.slug === existing.id);
     if (idx !== -1) {
       this.localData.categories[idx] = updated;
     } else {
@@ -937,24 +953,28 @@ class ServerContentDatabase {
   }
 
   public async deleteCategory(id: string, performedBy: string): Promise<boolean> {
-    this.loadLocalDatabase();
-    const existing = this.localData.categories.find((c) => c.id === id);
+    const existing = await this.getCategoryById(id);
+    if (!existing) return false;
 
     if (isSupabaseServerConfigured()) {
       const supabase = getSupabaseAdmin();
       if (supabase) {
         try {
-          await supabase.from('categories').delete().eq('id', id);
+          const { error } = await supabase.from('categories').delete().eq('id', existing.id);
+          if (error) {
+            console.warn('[SERVER_CONTENT_DB] Supabase deleteCategory error:', error.message);
+          }
         } catch (err) {
           console.warn('[SERVER_CONTENT_DB] Supabase deleteCategory error:', err);
         }
       }
     }
 
-    this.localData.categories = this.localData.categories.filter((c) => c.id !== id);
+    this.loadLocalDatabase();
+    this.localData.categories = this.localData.categories.filter((c) => c.id !== existing.id && c.slug !== existing.id);
     await this.recordAudit(
-      `Deleted category: ${existing?.name || id}`,
-      `वर्गवारी हटवली: ${existing?.nameMr || id}`,
+      `Deleted category: ${existing.name}`,
+      `वर्गवारी हटवली: ${existing.nameMr}`,
       'category',
       performedBy
     );

@@ -335,6 +335,33 @@ class ContentStore {
     };
   }
 
+  private async executeMutation(url: string, init: RequestInit = {}): Promise<boolean> {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        credentials: 'include',
+        headers: {
+          ...this.getMutationHeaders(),
+          ...(init.headers || {})
+        }
+      });
+
+      if (!res.ok) {
+        console.warn(`[CONTENT_SYNC] Mutation failed (HTTP ${res.status}) on ${url}. Rolling back state from server.`);
+        if (res.status === 401 || res.status === 403) {
+          authService.checkSession();
+        }
+        await this.syncFromServer();
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error(`[CONTENT_SYNC] Network failure during mutation on ${url}. Rolling back state:`, err);
+      await this.syncFromServer();
+      return false;
+    }
+  }
+
   // --- Getters ---
   public getProducts(): Product[] {
     return [...this.content.products];
@@ -434,12 +461,10 @@ class ContentStore {
     this.notify();
 
     // Persist to Server REST API
-    fetch('/api/content/products', {
+    this.executeMutation('/api/content/products', {
       method: 'POST',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify(newProduct)
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to create product on server:', err));
+    });
 
     return { success: true, product: newProduct };
   }
@@ -485,12 +510,10 @@ class ContentStore {
     this.notify();
 
     // Persist to Server REST API
-    fetch(`/api/content/products/${encodeURIComponent(id)}`, {
+    this.executeMutation(`/api/content/products/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify(updated)
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to update product on server:', err));
+    });
 
     return { success: true };
   }
@@ -516,12 +539,10 @@ class ContentStore {
       this.recordAudit(`Toggled availability for "${p.nameEnglish}" to ${p.availability}`, `"${p.nameMarathi}" ची उपलब्धता बदलली: ${p.availability}`, 'product');
       this.notify();
 
-      fetch(`/api/content/products/${encodeURIComponent(id)}`, {
+      this.executeMutation(`/api/content/products/${encodeURIComponent(id)}`, {
         method: 'PATCH',
-        credentials: 'include',
-        headers: this.getMutationHeaders(),
         body: JSON.stringify({ availability: p.availability })
-      }).catch((err) => console.error('[CONTENT_SYNC] Failed to patch availability on server:', err));
+      });
     }
     return { success: true };
   }
@@ -537,12 +558,10 @@ class ContentStore {
     this.recordAudit(`Toggled featured status for "${p.nameEnglish}" to ${nextState ? 'Yes' : 'No'}`, `"${p.nameMarathi}" चे वैशिष्ट्यीकृत स्वरूप बदलले: ${nextState ? 'होय' : 'नाही'}`, 'product');
     this.notify();
 
-    fetch(`/api/content/products/${encodeURIComponent(id)}`, {
+    this.executeMutation(`/api/content/products/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify({ featured: nextState, isBestseller: nextState })
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to patch featured status on server:', err));
+    });
 
     return { success: true };
   }
@@ -565,11 +584,9 @@ class ContentStore {
     this.recordAudit(`Deleted product "${item?.nameEnglish || id}"`, `उत्पादन हटवले: "${item?.nameMarathi || id}"`, 'product');
     this.notify();
 
-    fetch(`/api/content/products/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      credentials: 'include',
-      headers: this.getMutationHeaders()
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to delete product on server:', err));
+    this.executeMutation(`/api/content/products/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
 
     return { success: true };
   }
@@ -634,12 +651,10 @@ class ContentStore {
     this.recordAudit(`Added new category "${newCategory.name}" (${newCategory.id})`, `नवीन श्रेणी जोडली: "${newCategory.nameMr}"`, 'category');
     this.notify();
 
-    fetch('/api/content/categories', {
+    this.executeMutation('/api/content/categories', {
       method: 'POST',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify(newCategory)
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to create category on server:', err));
+    });
 
     return { success: true, category: newCategory };
   }
@@ -674,12 +689,10 @@ class ContentStore {
     this.recordAudit(`Updated category "${updated.name}" (${updated.id})`, `श्रेणी अद्यतनित केली: "${updated.nameMr}"`, 'category');
     this.notify();
 
-    fetch(`/api/content/categories/${encodeURIComponent(id)}`, {
+    this.executeMutation(`/api/content/categories/${encodeURIComponent(id)}`, {
       method: 'PUT',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify(updated)
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to update category on server:', err));
+    });
 
     return { success: true, category: updated };
   }
@@ -702,12 +715,10 @@ class ContentStore {
     this.recordAudit(`Toggled featured status for category "${c.name}" to ${nextState ? 'Yes' : 'No'}`, `श्रेणी "${c.nameMr}" चे वैशिष्ट्यीकृत स्वरूप बदलले: ${nextState ? 'होय' : 'नाही'}`, 'category');
     this.notify();
 
-    fetch(`/api/content/categories/${encodeURIComponent(id)}`, {
+    this.executeMutation(`/api/content/categories/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify({ featured: nextState, highlight: nextState })
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to patch category featured on server:', err));
+    });
 
     return { success: true };
   }
@@ -721,12 +732,10 @@ class ContentStore {
     this.recordAudit(`Toggled active status for category "${c.name}" to ${c.active ? 'Active' : 'Hidden'}`, `श्रेणी "${c.nameMr}" ची स्थिती बदलली: ${c.active ? 'सक्रिय' : 'लपवलेली'}`, 'category');
     this.notify();
 
-    fetch(`/api/content/categories/${encodeURIComponent(id)}`, {
+    this.executeMutation(`/api/content/categories/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify({ active: c.active })
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to patch category active on server:', err));
+    });
 
     return { success: true };
   }
@@ -748,11 +757,9 @@ class ContentStore {
     this.recordAudit(`Deleted category "${item?.name || id}"`, `श्रेणी हटवली: "${item?.nameMr || id}"`, 'category');
     this.notify();
 
-    fetch(`/api/content/categories/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      credentials: 'include',
-      headers: this.getMutationHeaders()
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to delete category on server:', err));
+    this.executeMutation(`/api/content/categories/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
 
     return { success: true };
   }
@@ -768,12 +775,10 @@ class ContentStore {
     this.recordAudit('Reordered categories display sequence', 'वर्गवारी क्रमवारी अद्यतनित केली', 'category');
     this.notify();
 
-    fetch('/api/content/categories/reorder', {
+    this.executeMutation('/api/content/categories/reorder', {
       method: 'POST',
-      credentials: 'include',
-      headers: this.getMutationHeaders(),
       body: JSON.stringify({ orderedIds })
-    }).catch((err) => console.error('[CONTENT_SYNC] Failed to reorder categories on server:', err));
+    });
 
     return { success: true };
   }
